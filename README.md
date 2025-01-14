@@ -18,7 +18,7 @@ Reproducibility, transparency. ~1,300 RNA-seq samples re-analyzed from scratch o
 
 ## Bash from Python
 
-To avoid any  about the provenance of the results and the methods behind them, the Bash scripts that launched most of the steps are stored with the results. That would be a lot of Bash scripts, but they are primarily generated in Python.
+To avoid any doubts about the provenance of the results and the methods behind them, the Bash scripts that launched most of the steps are stored with the results. That would be a lot of Bash scripts, but they're primarily generated in Python.
 
 ## Acknowledgments
 
