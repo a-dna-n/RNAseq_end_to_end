@@ -1,6 +1,9 @@
-from .tools import *
+import sys
 import os
 from types import SimpleNamespace
+sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from modules.tools import *
+
 
 class define_constants:
 
@@ -8,8 +11,11 @@ class define_constants:
 
     def __init__(self):
         hostname = execute_command("hostname")[0]
-        # constants = SimpleNamespace()
-        read_types = ["paired", "single"]
+        read_type = SimpleNamespace(
+            paired = "paired",
+            single = "single"
+        )
+        read_types = [read_type.paired, read_type.single]
         # Literal conflicts with argparse
         # rnaseq.py genomeref: error: argument --species/-s: invalid choice: 'mouse' (choose from typing.Unpack[typing.Literal['human', 'mouse']])
 
@@ -39,7 +45,7 @@ class define_constants:
             options = "--donotsort --fraction -M -O --extraAttributes gene_biotype,gene_name",
             constant_columns = "Geneid Chr Start End Strand Length gene_biotype gene_name".split(),
             unique_IDs = {
-                species: f"{ref_dir}/ens.to.gene.{species}.if.unique" for species in known_species
+                species: f"{ref_dir}/ens.to.gene.if.unique.{species}" for species in known_species
             }
         )
         exit_if_startup_errors = False
@@ -48,12 +54,16 @@ class define_constants:
         default_gene_metadata = "counts_gene_metadata.txt"
         default_merged_counts = "counts_combined.txt"
         default_counts_by_gene_name = "counts_by_gene_name.txt"
+        geo_fetch_author_supp = "get_author_supplementary_files_from_GEO_"
+        geo_fetch_NCBI_counts = "get_NCBI_counts_human_"
+        """
         rnaspades = SimpleNamespace(
             exe = "${HOME}/bin/SPAdes-3.15.5/bin/rnaspades.py",
             tempdir = {"t3": "/media/2tb2/spades_temp"}.get(hostname, ""),
             mem = 60, #{"L490": 42, "t3": 60, "p43s": 20}.get(hostname, 0),
             sortmem = 4000 # {"L490": 4000, "t3": 4000, "p43s": 3000}.get(hostname, 0)
         )
+        """
         sortcpus = 11 #{"t3": 11}.get(hostname, cpus - 1)
         bed12_columns = "chrom chromStart chromEnd name score strand thickStart thickEnd itemRgb blockCount blockSizes blockStarts".split()
         gene_bams_zipfile = "gene.bams.zip"
@@ -71,6 +81,7 @@ class define_constants:
         gtf = {
             species: os.path.join(ref_dir, os.path.basename(ref.rna[species])).replace(".gz","") for species in ref.rna.keys()
         }
+        """
         minimap = SimpleNamespace(
             junctions = {
                 species: os.path.basename(gtf[species]).replace("gtf", "bed") for species in gtf.keys()
@@ -80,13 +91,17 @@ class define_constants:
                 "mouse": "Mus_musculus.w5.mmi",
             }
         )
+        """
+        species_unalias = {"Homo sapiens" :  "human", "Mus musculus": "mouse"}
+        metadata_sources = ["SRA", "GEO", "ENA"]
+        file_prefix = SimpleNamespace(pysradb = "pySRAdb", geoparse = "GEOparse",  geo = "GEO",  ena = "ENA")
         self.__dict__.update(**{k: v for (k, v) in locals().items() if not(k.startswith("_")  or k.startswith("self"))})
         """
         for k, v in locals().items():
             if k.startswith("self"):
                 continue
             if k.startswith("_"):
-                continue
+                conti   nue
             print(f"{k}: {v}")
         """
 

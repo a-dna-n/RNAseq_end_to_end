@@ -2,9 +2,10 @@ import sys
 import os
 import argparse
 from types import SimpleNamespace
-from .constants import *
+sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+from modules.constants import *
 
-#constants = define_constants()
+# constants = define_constants()
 
 class ArgDef:
 
@@ -139,36 +140,55 @@ def define_args(constants):
         desc="Functions for RNA-seq data.", subfunctions=True, allow_unknown_args=False
     )
 
-    # geo
-    fn = "geo"
-    help_text ="Get metadata from GEO"
+    fn = "metadata"
+    help_text ="Find metadata and files available from GEO, SRA and ENA."
     subparser = args.add_subfunction(newfn=fn, help_text=help_text)
     subparser.add_argument(
-        "--ids", "-i", type=str, required=True, help="Identifier(s).", nargs="+"
+        "--studydir",
+        "-d",
+        required=True,
+        help="Folder where metadata files will be stored, with each source in its own subfolder.",
     )
     subparser.add_argument(
-        "--ext",
-        "-O",
+        "--id", "-i", type=str, required=True, help="GEO, SRA or ENA identifier. Ex. PRJNA743892 GSE162198 SRP294329",
+    )
+    """
+    subparser.add_argument(
+        "--sources",
+        "-s",
         type=str,
         required=False,
-        help="Output file suffix",
-        default="_geo.txt",
+        help="Source(s) of metadata to query",
+        choices = constants.metadata_sources, #= ["SRA", "GEO", "ENA"],
+        default = constants.metadata_sources, #["ENA", "SRA", "GEO"],
+        nargs = "+"
     )
-
+    """
+    subparser.add_argument(
+        "--assay",
+        "-a",
+        type=str,
+        required=False,
+        help="Data type of interest.",
+        default = ["RNA-Seq"],
+        nargs = "+"
+    )
+    subparser.add_argument(
+        "--species",
+        "-S",
+        type=str,
+        required=False,
+        help="Species of interest.",
+        default = constants.known_species,
+        nargs = "+"
+    )
+    
     # metadata
-    fn = "pysradb"
+    fn = "pySRAdb_get_metadata"
     help_text ="Get metadata with pysradb"
     subparser = args.add_subfunction(newfn=fn, help_text=help_text)
     subparser.add_argument(
         "--ids", "-i", type=str, required=True, help="Identifier(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--keeptempfiles",
-        "-k",
-        required=False,
-        help="Keep temp output files.",
-        default=False,
-        action="store_true",
     )
     subparser.add_argument(
         "--outputfile",
@@ -194,6 +214,22 @@ def define_args(constants):
     )
     # subparser.add_argument("--source", "-m", type=str, required=False, help="Source of metadata.", default="SRA", choices=["ENA", "SRA", "GEO"])
 
+    # geo
+    fn = "geo"
+    help_text ="Get metadata from GEO"
+    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
+    subparser.add_argument(
+        "--ids", "-i", type=str, required=True, help="Identifier(s).", nargs="+"
+    )
+    subparser.add_argument(
+        "--ext",
+        "-O",
+        type=str,
+        required=False,
+        help="Output file suffix",
+        default="_geo.txt",
+    )
+
     # dedup_cols
     fn = "dedup_cols"
     help_text ="Remove duplicate columns"
@@ -211,7 +247,7 @@ def define_args(constants):
 
     # enafastqs
     fn = "enafastqs"
-    help_text ="Get la ist of ENA fastqs for ID(s) like PRJNA627881"
+    help_text ="Get a ist of ENA fastqs for ID(s) like PRJNA627881"
     subparser = args.add_subfunction(newfn=fn, help_text=help_text)
     subparser.add_argument(
         "--ids", "-i", type=str, required=True, help="Identifier(s).", nargs="+"
@@ -409,7 +445,6 @@ def define_args(constants):
         action="store_true",
     )
 
-
     # STAR alignments etc.
 
     fn = "star"
@@ -421,7 +456,7 @@ def define_args(constants):
         type=str,
         required=True,
         help="Genome index. Path is ignored.",
-        choices=list(constants.star_indexes.keys()),
+        choices=list(constants.star_indexes),
     )
     subparser.add_argument(
         "--inputfile", "-i", type=str, required=True, help="Input file."
@@ -501,12 +536,14 @@ def define_args(constants):
         help="Read pairing",
         choices=constants.read_types,
     )
+    """
     subparser.add_argument(
         "--rnaspades",
         type=str,
         required=False,
         help="Coords file to use for gene bams then rnaspades.",
     )
+    """
     subparser.add_argument(
         "--sortcpus", "-C", type=int, required=False, default=int(constants.cpus / 2),
         help="CPUs to use for sorting"
@@ -815,6 +852,57 @@ def define_args(constants):
         help="Output file."
     )
 
+    fn = "rank_values"
+    help_text ="Add a rank column to a tab-delimited file, simply in order or based on a column."
+    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
+    subparser.add_argument(
+        "--inputfile", "-i", type=str, required=True, help="Input file."
+    )
+    subparser.add_argument(
+        "--outputfile",
+        "-o",
+        type=str,
+        required=False,
+        help="Output file, otherwise stdout",
+    )
+    subparser.add_argument(
+        "--column",
+        "-c",
+        type=str,
+        required=False,
+        help="Column of values by which to rank. If omitted, uses the  order of appearance.",
+    )
+    subparser.add_argument(
+        "--newcolumn",
+        "-n",
+        type=str,
+        required=False,
+        help="Name of new column. By default, 'order' or 'rank by ' + column_name",
+    )
+    subparser.add_argument(
+        "--order",
+        "-O",
+        help="Sort order",
+        type=str,
+        required=False,
+        default = "ascending",
+        choices = ["ascending", "descending"],
+    )
+    subparser.add_argument(
+        "--sort",
+        "-s",
+        required=False,
+        help="Sort data before output",
+        action="store_true",
+    )
+    subparser.add_argument(
+        "--overwrite",
+        "-w",
+        required=False,
+        help="Overwrite files if present.",
+        action="store_true",
+    )
+
     # transformcounts
     fn = "transformcounts"
     help_text ="Calculate CPM or RPKM. Also output total counts."
@@ -959,7 +1047,7 @@ def define_args(constants):
         "--script", "-S", type=str, required=False, default=f"{fn}.sh", 
         help='Output commands to bash script. Set to "" for stdout.',
     )
-
+    """
     # rnaspades
     fn = "rnaspades"
     help_text ="Assemble transcripts from gene-specific and unaligned reads with RNAspades."
@@ -1019,7 +1107,7 @@ def define_args(constants):
         default=f"{fn}.sh",
         help='Output commands to bash script. Set to "" for stdout.',
     )
-
+    """
     # abra2
     fn = "abra2"
     help_text ="Realign indels from BAM files with abra2."
@@ -1082,9 +1170,9 @@ def define_args(constants):
     )
 
     # BAM files
-    
+
     # species
-    fn = "species"
+    fn = "bam_species"
     help_text ="Output species for every BAM file."
     subparser = args.add_subfunction(newfn=fn, help_text=help_text)
     subparser.add_argument(
@@ -1188,8 +1276,7 @@ def define_args(constants):
         choices=constants.known_species
     )
     """
-
-
+    """
     # minimap
     fn = "minimap"
     help_text ="Align fastas to genome"
@@ -1237,9 +1324,8 @@ def define_args(constants):
         help='Output commands to bash script. Set to "" for stdout.'
     )
 
-
     # other utils
-    
+
     # text_to_fasta
     fn = "text_to_fasta"
     help_text ="Convert tab-delimited file to fasta."
@@ -1257,6 +1343,7 @@ def define_args(constants):
         required=False,
         help="Output file. Stdout if omitted.",
     )
+    """
 
     # fasta_to_text
     fn = "fasta_to_text"
@@ -1275,7 +1362,6 @@ def define_args(constants):
         required=False,
         help="Output file. Stdout if omitted.",
     )
-
 
     # join
     fn = "join_files"
@@ -1306,7 +1392,7 @@ def define_args(constants):
         type=str,
         required=False,
         help="How to join.",
-        choices="inner outer left right",
+        choices="inner outer left right".split(),
         default="inner",
     )
     subparser.add_argument(
@@ -1333,4 +1419,3 @@ def define_args(constants):
     )
 
     return args
-

@@ -1,439 +1,418 @@
 #!/usr/bin/env python
 
-# /home/adnan/star/ref/ens.to.gene.mouse.if.unique
+"""
+This module provides functions to retrieve RNA-seq data and metadata, launch alignments, counts, reassembly, etc.
 
-# functions for RNA-seq data - retrieval, alignment etc.
+It is not remotely intended to compete with Nextflow etc.
+
+For some studies, there is data in SRA or GEO but not both, or only in ENA.
+The reads may be in different place, but the ideal source is ENA since it lets us use aspera for download.
+
+GEOparse and pySRAdb have excellent features, but neither knows about NCBI human recounts, and neither lets us choose which supplementary files to download depending on their contents. GEOparse only uses soft-formatted files, which are problematic in studies with human and mouse samples.
+
+"""
 
 import sys
 import os
-import argparse
+from modules.tools import *
+
+test_executables("free gunzip hostname pysradb samtools STAR wget".split(), exit_on_error = False)
+test_libraries("numpy pandas pysradb".split(), exit_on_error = True) # GEOparse 
+
 import re
 import glob
-from collections import OrderedDict, Counter
 from textwrap import dedent
-import subprocess
+from collections import OrderedDict, Counter
 from types import SimpleNamespace
-from typing import TypeAlias, Union #, Literal
 import pandas as pd
-import numpy as np
+import numpy as npf
 from pysradb.sraweb import SRAweb
-
-#import requests
-
-FileName: TypeAlias = Union[str | bytes | os.PathLike]
-
-# cat grep hostname wget which zcat
-# abra2 minimap2 pysradb regtools samtools spades STAR 
-
-def log_message(message, *, exit_now: bool = False):
-    print(message, file=sys.stderr)
-    if exit_now:
-        sys.exit(1)
+#import GEOparse
+from modules.arg_def import *
+from lxml import html
+import requests
+constants = define_constants()
 
 
-def detect_stdin():
-    if sys.stdin.isatty() == 0:
-        return True
-    else:
-        return False
-
-def  _caller():
-    import inspect
-    return inspect.currentframe().f_code.co_name
-
-def execute_command(
-    command: str,
-    *,
-    exit_on_error: bool = False,
-    log_command: bool = False,
-    suppress_error_messages: bool = False,
-):
-    if log_command:
-        log_message(f"# Executing {command}")
-    try:
-        output = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
-    except:
-        if not suppress_error_messages:
-            log_message(f"Execution failed: {command}")
-        if exit_on_error:
-            sys.exit(1)
-        return []
-    return [line.rstrip().decode("CP437") for line in output.splitlines()]
-
-"""
-if isinstance(data, argparse.Namespace):
-return SimpleNamespace(**{k.upper(): v for k, v in data.__dict__.items()})
-else:
-return SimpleNamespace(**{k.upper(): v for k, v in data.items()})
-"""
-
-class define_constants:
-
-    #known_species = Literal["human", "mouse"] #, "monkey", "vero"]
-
-    def __init__(self):
-        hostname = execute_command("hostname")[0]
-        # constants = SimpleNamespace()
-        read_types = ["paired", "single"]
-        # Literal conflicts with argparse
-        # rnaseq.py genomeref: error: argument --species/-s: invalid choice: 'mouse' (choose from typing.Unpack[typing.Literal['human', 'mouse']])
-
-        cpus = int(execute_command("grep -c ^processor /proc/cpuinfo")[0])
-        known_species = ["human", "mouse"] #, "monkey", "vero"]
-        _star_base_dir = "${HOME}/star"
-        ref_dir = os.path.join(_star_base_dir, "ref")
-        sortmem = 4000 #{"L490": 4000, "t3": 4000, "p43s": 3000}.get(hostname, 0)
-        star = SimpleNamespace(
-            base_dir = _star_base_dir,
-            dummy_fastq = f"{_star_base_dir}/dummy.fastq",
-            bin_dir = os.path.join(_star_base_dir, "scripts"),
-            sortmem = int(sortmem / 2),
-            sortcpus = int(cpus / 2),
-            indexmem = 48000000000
-        )
-        coords_source_file = {
-            str(species): os.path.join(ref_dir, f"gene_coords_{species}.txt")
-            for species in known_species
-        }
-        index_stores = [_star_base_dir]
-        index_stores += [
-            x for x in ["/media/2tb2", "/mnt/p2"] if os.path.exists(x)
-        ]  # keep in order
-
-        featurecounts = SimpleNamespace(
-            options = "--donotsort --fraction -M -O --extraAttributes gene_biotype,gene_name",
-            constant_columns = "Geneid Chr Start End Strand Length gene_biotype gene_name".split(),
-            unique_IDs = {
-                species: f"{ref_dir}/ens.to.gene.{species}.if.unique" for species in known_species
-            }
-        )
-        exit_if_startup_errors = False
-        counts_sample_ID_file = "counts_sample_ids.txt"
-        default_total_counts = "total_counts.txt"
-        default_gene_metadata = "counts_gene_metadata.txt"
-        default_merged_counts = "counts_combined.txt"
-        default_counts_by_gene_name = "counts_by_gene_name.txt"
-        rnaspades = SimpleNamespace(
-            exe = "${HOME}/bin/SPAdes-3.15.5/bin/rnaspades.py",
-            tempdir = {"t3": "/media/2tb2/spades_temp"}.get(hostname, ""),
-            mem = 60, #{"L490": 42, "t3": 60, "p43s": 20}.get(hostname, 0),
-            sortmem = 4000 # {"L490": 4000, "t3": 4000, "p43s": 3000}.get(hostname, 0)
-        )
-        sortcpus = 11 #{"t3": 11}.get(hostname, cpus - 1)
-        bed12_columns = "chrom chromStart chromEnd name score strand thickStart thickEnd itemRgb blockCount blockSizes blockStarts".split()
-        gene_bams_zipfile = "gene.bams.zip"
-        gene_bams_realigned_zipfile = "gene.bams.realigned.zip"
-        ref = SimpleNamespace(
-            dna = {
-                "human": "https://ftp.ensembl.org/pub/release-109/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz",
-                "mouse": "https://ftp.ensembl.org/pub/release-109/fasta/mus_musculus/dna/Mus_musculus.GRCm39.dna.primary_assembly.fa.gz",
-            },
-            rna = {
-                "human": "https://ftp.ensembl.org/pub/release-109/gtf/homo_sapiens/Homo_sapiens.GRCh38.109.gtf.gz",
-                "mouse": "https://ftp.ensembl.org/pub/release-109/gtf/mus_musculus/Mus_musculus.GRCm39.109.gtf.gz"
-            }
-        )
-        gtf = {
-            species: os.path.join(ref_dir, os.path.basename(ref.rna[species])).replace(".gz","") for species in ref.rna.keys()
-        }
-        minimap = SimpleNamespace(
-            junctions = {
-                species: os.path.basename(gtf[species]).replace("gtf", "bed") for species in gtf.keys()
-            },
-            genome = {
-                "human": "Homo_sapiens.w5.mmi",
-                "mouse": "Mus_musculus.w5.mmi",
-            }
-        )
-        self.__dict__.update(**{k: v for (k, v) in locals().items() if not(k.startswith("_")  or k.startswith("self"))})
-        """
-        for k, v in locals().items():
-            if k.startswith("self"):
-                continue
-            if k.startswith("_"):
-                continue
-            print(f"{k}: {v}")
-        """
-
-class ArgDef:
-
-    def __init__(
-        self, *, desc: str, subfunctions: bool = True, allow_unknown_args: bool = False
-    ):
-        self.unknownargs = None
-        self.args = None
-        self.argparser = argparse.ArgumentParser(
-            description=desc, formatter_class=argparse.ArgumentDefaultsHelpFormatter
-        )
-        self.subfunctions = subfunctions
-        if subfunctions:
-            self.subparsers = self.argparser.add_subparsers(
-                description=" ", metavar=""
-            )
-        else:
-            self.subparsers = None
-        self.subparser = {}
-        self.allow_unknown_args = allow_unknown_args
-        
-
-    def add_subfunction(self, *, newfn: str, help_text: str, args: list|None = None):
-        if self.subparsers is None:
-            sys.exit("self.subparsers not initialized")
-        subparser = self.subparsers.add_parser(
-            newfn, help=help_text, formatter_class=argparse.ArgumentDefaultsHelpFormatter
-        )
-        subparser.set_defaults(func=newfn)
-        self.subparser[newfn] = subparser
-        return subparser
-
-    @staticmethod
-    def convert_args_to_upper_case(data: dict | argparse.Namespace):
-        """
-        Converts argparse parameter names to uppercase, e.g. the value of --inputfile is accessed as args.INPUTFILE.
-        Nested dictionaries not tested.
-
-        Args:
-            data: a dictionary or namespaces (not nested)
-
-        Returns:
-            A simplenamespace with dot notation.
-        """
-        if isinstance(data, argparse.Namespace):
-            return SimpleNamespace(**{k.upper(): v for k, v in data.__dict__.items()})
-        else:
-            return SimpleNamespace(**{k.upper(): v for k, v in data.items()})
-
-    def handle_args(self, assume_help: bool = True):
-        if len(sys.argv) == 1 and assume_help:
-            self.argparser.print_help()
-            sys.exit()
-        if self.allow_unknown_args:
-            # knownargs, unknownargs = self.argparser.parse_known_args()
-            args, self.unknownargs = self.argparser.parse_known_args()
-        else:
-            args = self.argparser.parse_args()
-        if self.subfunctions:
-            self.func = args.func
-        else:
-            self.func = None
-        self.args = self.convert_args_to_upper_case(args)
-
-
-def verify_columns_present_in_dataframe(
-    *, data, columns: str | list[str], source: str | None
-):
-    # data = DataFrame
-    # columns = string, set or list of strings
-    # if any columns are missing, outputs error message and exits
-    if isinstance(columns, str):
-        columns = [columns]
-    if missing := columns - set(data.columns):
-        missing = "\n".join(list(missing))
-        if source:
-            log_message(f"column(s) missing in {source}:")
-        else:
-            log_message("column(s) missing:")
-        log_message(missing, exit_now=True)
-
-
-def system_memory():
-    return int(execute_command("free --mega | grep ^Mem")[0].split(" ")[-1])
-
-def test_executables(exes: str | list[str], *, exit_on_error: bool = False):
+def pySRAdb_convert(*, fn: str, id: str) ->str:
     """
-    Test if programs/scripts are executable.
-
-    Args:
-        exes: program (string) or programs (list of strings)
-        exit_on_error: stop if any program on the list is not executable. Defaults to False.
+    Calls pysradb to convert IDs using a specific function
+    > pysradb gsm-to-gse GSM4679562
+    study_alias	study_accession
+    GSE154783	SRP272683
     """
-    # exes = string or list of strings
-    # check if executable
-    if isinstance(exes, str):
-        exes = [exes]
-    for exe in exes:
-        execute_command(f"which {exe}", exit_on_error=exit_on_error)
+    cmd = f"pysradb {fn} {id}"
+    log_message(cmd)
+    temp = execute_command(cmd)
 
+    prefix = fn[-3:].upper()
+    # print(f"fn {fn} id {id} prefix {prefix}")
+    if len(temp) == 2:
+        new_ids = temp[-1].rstrip().split()
+        # new_id = temp[-1].rstrip().split()[1]
+        for new_id in new_ids:
+            if new_id.startswith(prefix):
+                log_message(f"{id} => {new_id}")
+                return new_id
+    log_message(f"Invalid output:", *temp, sep="\n\t")
+    return ""
 
-def verify_that_paths_exist(path_or_paths: str | list[str], exit_on_error: bool = True):
-    # checks if files and/or folders exist
-    # returns true if all exist
-    if isinstance(path_or_paths, str):
-        path_list = [path_or_paths]
-    else:
-        path_list = path_or_paths
-    if missing := [x for x in path_list if not os.path.exists(x)]:
-        missing = "\n".join(missing)
-        log_message(f"paths not found:\n{missing}", exit_now=exit_on_error)
-        return False
-    return True
+def pySRAdb_get_metadata(ID: str, *, outputdir: File_or_Dir, outputfileprefix: str = constants.file_prefix.pysradb) -> pd.DataFrame:
+    # , species: str|list[str], expt_type: str|list[str]# 
+    log_message(f"Retrieving metadata from SRA.")
+    if not ID.startswith("SRP"):
+        log_message(f"{ID} may not work. pySRAdb needs an SRP ID, e.g. SRP247494")
 
+    # Get metadata for a study, save it as is.
+    check_dir_write_access(outputdir)
+    if os.path.basename(outputfileprefix) != outputfileprefix:
+        log_message("Output file prefix cannot include directory", exit_now=True)
 
-def exit_if_files_exist(file_or_files: str | list[str]):
-    # checks if files and/or folders exist
-    # reports error and exits if any file exists
-    if isinstance(file_or_files, str):
-        file_list = [file_or_files]
-    else:
-        file_list = file_or_files
-    if files_found := [x for x in file_list if os.path.exists(x)]:
-        files_found = "\n".join(files_found)
-        log_message(f"output file(s) found:\n{files_found}", exit_now=True)
-
-
-def is_a_gene_bam(bamfile: FileName):
-    if ".realigned." in bamfile:
-        log_message(f"Unexpected input: {bamfile} is a realigned BAM", exit_now=True)
-    if ".genes." in bamfile:
-        return True
-    return False
-
-
-def gene_bam(bamfile: FileName):
-    # input = name of standard bam
-    # output = corresponding gene-specific bam
-    if is_a_gene_bam(bamfile):
-        log_message(
-            f"Unexpected input: {bamfile} is a region-specific BAM file", exit_now=True
-        )
-    return re.sub(r"\.bam$", ".genes.bam", bamfile)
-
-
-def realigned_gene_bam(bamfile: FileName):
-    # input = gene bam file
-    # output = corresponding gene-specific bam
-    if is_a_gene_bam(bamfile):
-        return re.sub(".genes.bam", ".genes.realigned.bam", bamfile)
-    log_message(
-        f"Unexpected input: {bamfile} is not a region-specific BAM file.", exit_now=True
-    )
-
-
-def get_read_type_for_bamfile(bamfile: FileName, check_if_bamfile_exists: bool = True):
-    # bamfile = string
-    # checks flag of first alignment, returns "paired" or "single"
-    if check_if_bamfile_exists:
-        verify_that_paths_exist(bamfile)
-    samtools_flag = execute_command(
-        f"samtools view {bamfile} | head -n 1 | cut -f 2", exit_on_error=True
-    )[0]
-    if isinstance(samtools_flag, str):
-        samtools_flag_translation = execute_command(
-            f"samtools flags {samtools_flag}", exit_on_error=True
-        )[0]
-        if (
-            "PAIRED" in samtools_flag_translation
-        ):  # execute_command(f"samtools flags {samtools_flag} | grep PAIRED", exit_on_error=True):
-            return "paired"
-        else:
-            return "single"
-    log_message(
-        f"Invalid output from samtools view {bamfile}:\n{samtools_flag}", exit_now=True
-    )
-
-def get_species_for_a_bam_file(bamfile: FileName):
-    for line in execute_command(f"samtools view -H {bamfile}", exit_on_error=True):
-        if m := re.search(r'.*?genomeDir\s+(.*?)\s', line):
-            for s in constants.known_species:
-                if s in m.groups()[0]:
-                    return s
-            log_message(f"{bamfile}: genomeDir but no valid species:\n" + line.rstrip())
-            return None
-    log_message(f"No species was found for {bamfile}")
-    return None
-
-def get_species_for_bamfiles(
-    bamfiles: list[FileName],
-):  # , known_species: constants.known_species):
-    # input = bam files as list of strings
-    # expects to find species in STAR genomeDir parameter from samtools header
-    # @PG	ID:STAR	PN:STAR	VN:2.7.10b	CL:STAR   ... --genomeDir ${HOME}/star/human.GRCh38_109.75 ...
-    # fails if no species is found or multiple species are found
-    # otherwise returns a dict
-
-    verify_that_paths_exist(bamfiles)
-    species_for_bam = {}
-    for bamfile in bamfiles:
-        if species_found := get_species_for_a_bam_file(bamfile):
-            species_for_bam[bamfile] = species_found
-    return species_for_bam
-
-r"""
-species_found = False
-#query = f"samtools view -H {bamfile} | grep genomeDir -m 1"
-for line in execute_command("samtools view -H {bamfile}", exit_on_error=True):
-    if m := re.search(r'.*?genomeDir\s+(.*?)\s', line):
-        if m.groups()[0] in constants.known_species:
-            species_for_bam[bamfile] = m.groups()[0]
-            species_found = True
-            break
-if isinstance(temp, str):
-    genomeDir = re.sub(r"", "", temp).split(" ")[0]
-    found = [s for s in constants.known_species if s in genomeDir]
-    if len(found) == 0:
-        log_message(
-            f"No recognized species in genomeDir {genomeDir} for BAM file {bamfile} in header line {temp}",
-            exit_now=True,
-        )
-    elif len(found) > 1:
-        found = ", ".join(found)
-        log_message(
-            f"Multiple species recognized in genomeDir {genomeDir} in BAM header line {temp}: {found}",
-            exit_now=True,
-        )
-    else:
-        species_for_bam[bamfile] = found[0]
-        #for assembly, species in species_by_assembly.items():
-        #    if assembly in genomeDir:
-        #        return species
-else:
-    log_message(f"Invalid output from {query}", exit_now=True)
-
-def sra_parse_exp(x):
-    temp = str(x).split(": ")
-    if len(temp) == 1: return temp[0]
-    return temp[1].split(";")[0]
-"""
-
-def get_sra_metadata(*, id: str, delete_temp_output: bool = False):
-    # get metadata for a single ID from sra via pysradb
-    # returns dataframe
+    if not constants.file_prefix.pysradb.lower() in outputfileprefix.lower():
+        outputfileprefix = "_".join([outputfileprefix, constants.file_prefix.pysradb]) #{outputfileprefix}_pySRAdb"
+    if not ID in outputfileprefix:
+        outputfileprefix =  "_".join([outputfileprefix, ID])
     
-    db = SRAweb()
-    return db.sra_metadata(id, detailed=True)
-    """
-    tempoutputfile = f"pysradb.{id}.temp"
-    query = f"pysradb metadata --detailed {id} > {tempoutputfile}"
-    df = db.sra_metadata("SRP016501")
-    if os.path.exists(tempoutputfile):
-        log_message(f"Using {tempoutputfile}")
+    outputfile = os.path.join(outputdir, outputfileprefix + ".txt")
+    if os.path.exists(outputfile):
+        log_message(f"reading pySRAdb metadata from local file {outputfile}")
+        return pd.read_csv(outputfile, sep="\t", header = 0, dtype=object), outputfile
     else:
-        temp = execute_command(query)
-        if not (os.path.exists(tempoutputfile)):
-            log_message(f"No output from {query}")
-            return None
-    try:
-        data = pd.read_csv(tempoutputfile, sep="\t", header=0, dtype=object)
-    except:
-        log_message(f"Error reading {tempoutputfile}. Query was: {query}")
-        return None
-    if delete_temp_output:
-        os.remove(tempoutputfile)
-        log_message(f"Deleted {tempoutputfile}.")
-    return data
+        db = SRAweb()
+        response = db.sra_metadata(ID, detailed=True)
+        if response.shape[0]:
+            response.to_csv(outputfile, sep="\t",  index=False)
+            log_message(f"pySRAdb metadata for {ID} written to {outputfile}")
+            return response, outputfile
+        else:
+            log_message(f"No metadata for {ID} via pySRAdb.")
+            return None,  None
+
+
+def parse_SRA_metadata(*, data: pd.DataFrame, ID: str, species: str|list[str], expt_type: str|list[str], outputfileprefix: str = constants.file_prefix.pysradb, overwrite: bool=False):
+    """
+    This code expects columns specific to RNA-seq.
+
+    Subset metadata by species and assay, parse output separately.
+    Only calls the metadata function fof pySRAdb, which can be used directly on the command line.
+    if species is specified, returns a dict of dataframe(s) with species as the key
+    otherwise returns a single dataframe
+    """
+    if isinstance(species, str):
+        species = [species]
+    if isinstance(expt_type, str):
+         expt_type = [expt_type]
+    if not  ID in outputfileprefix:
+        outputfileprefix = "_".join([outputfileprefix, ID])
+    outputfile = {(sp, ex): "_".join([outputfileprefix, constants.species_unalias[sp], ex])+".txt" for sp in species for ex in expt_type}
+    if not overwrite:
+        exit_if_files_exist(outputfile.values())
+    #organism = {"human" : "Homo sapiens", "mouse" : "Mus musculus"}
+    #if unk := set(species) - set(organism.keys()):
+    #    log_message(f"Unknown species", *unk, sep="\n\t", exit_now=True)
+
+    expt_type_columns = list(set(["strategy", "library_strategy"]) & set(data.columns))
+    if len(expt_type_columns) == 0:
+        log_message(f"No strategy or library_strategy column", exit_now=True)
+    if len(expt_type_columns) > 1:
+        log_message(f"Multiple strategy columns", exit_now=True)
+    if "strategy" in data.columns:
+        data.rename(columns = {"strategy": "library_strategy"}, inplace=True)
+
+    columns_to_keep = ["run_total_bases", "run_total_spots", "organism_name", "library_layout", "study_accession"]
+
+    verify_columns_present_in_dataframe(data=data, columns = columns_to_keep, source="SRA")
+    
+    # output summaries while filtering
+
+    data_types = data["library_strategy"].unique().tolist()
+    log_message(f"Types of data in this study:", *data_types, sep="\t")
+    N_initial = data.shape[0]
+    mask = data["library_strategy"].isin(expt_type)
+    if data.shape[0] == 0:
+        log_message(f"No samples match the experiment type.", exit_now=True)
+    log_message(f"{data.shape[0]} rows out of {N_initial} were selected by type of data")
+
+    species_in_study = data["organism_name"].unique().tolist()
+    log_message(f"Species with data in this study:", *species_in_study, sep="\t")
+
+    mask = data["organism_name"].isin(species)
+    data = data[mask].copy()
+    if data.shape[0] == 0:
+        log_message(f"No samples have the selected species.", exit_now=True)
+    log_message(f"{data.shape[0]} rows out of {N_initial} were selected by species")
+
+    columns_to_drop = []
+
+    def _check_experiment_alias(data):
+        columns_to_drop = []
+        if "experiment_alias" in data.columns:  # GSM
+            mask = data["experiment_alias"].isna()
+            tempdata = data[mask]
+            if tempdata.shape[0]:
+                log_message(f"{tempdata.shape[0]} missing run accessions:", *tempdata["run_accession"].unique().tolist(), sep=", ")
+            tempdata = data[~mask]
+            temp = list(tempdata["experiment_alias"])
+            if len(temp) != len(set(temp)):
+                log_message("Non-unique experiment_alias:", *set(temp), sep="\n\t")
+            if "run_alias" in data.columns and list(data["run_alias"]) == list(
+                    [f"{x}_r1" for x in data["experiment_alias"]]
+                ):
+                    columns_to_drop.append("run_alias")
+        if columns_to_drop:
+            return data.drop(columns = columns_to_drop)
+        return data
+
+    def SRA_simplify_exp_desc(x):
+        temp = str(x).split(": ")
+        if len(temp) == 1: return temp[0]
+        return temp[1].split(";")[0]
+
+
+    def _check_experiment_title(data):
+        columns_to_drop = []
+        if "experiment_title" in data.columns:
+            for col in set(["experiment_desc", "library_name"]) & set(data.columns):
+                if list(data[col]) == list(data["experiment_title"]):
+                    columns_to_drop.append(col)
+            data["experiment_title"] = data.apply(
+                lambda x: SRA_simplify_exp_desc(x), axis=1
+            )
+        if columns_to_drop:
+            return data.drop(columns = columns_to_drop)
+        return data
+
+    def _drop_empty_columns(data):
+        if columns_to_drop := [x for x in data.columns if all(data[x].isna()) or all(data[x] == "missing")]:
+            return data.drop(columns = columns_to_drop)
+        return data
+
+    def drop_unneeded(data):
+        columns_to_drop = {col for col in data.columns if col[0:3] in ["aws", "gcp", "pub", "ncb"]}
+        columns_to_drop  |= set("experiment_accession accession library_source library_selection instrument instrument_model instrument_model_desc organism_taxid total_size".split())
+        if columns_to_drop := columns_to_drop & set(data.columns):
+            return data.drop(columns = list(columns_to_drop))
+        return data
+   
+    def delete_if_single_values(data, columns_to_keep):
+        columns_to_drop = [col for col in data.columns if len(set(data[col]))==1]
+        columns_to_drop = list(set(columns_to_drop) - set(columns_to_keep))
+        if columns_to_drop := [x for x in data.columns if all(data[x].isna()) or all(data[x] == "missing")]:
+            return data.drop(columns = columns_to_drop)
+        return data
+        
+    def edit_ENA_fastq_URLs(data):
+        if ena_columns := [col for col in data.columns if col.startswith("ena_fastq_")]:
+            h_to_f = {}
+            for col in ena_columns:
+                if col.startswith("ena_fastq_ftp"):
+                    data[col] = data[col].str.replace("era-fasp@fasp.sra.ebi.ac.uk:", "")
+                elif col.startswith("ena_fastq_http"):
+                    data[col] = data[col].str.replace("http://ftp.sra.ebi.ac.uk/", "")
+                    h_to_f[col] =  col.replace("http", "ftp")
+            if redundant := {h: f for h, f in h_to_f.items() if f in data.columns and data[h].tolist() == data[f].tolist()}:
+                for h, f in redundant.items():
+                    log_message(f"{h} is identical to {f}")
+                return data.drop(columns = list(redundant.keys()))
+        return data
+
+
+    def edit_study_title(data):
+        if "study_title" in data.columns:
+            data["study_title"] = data["study_title"].str.replace(
+                r"\s*\[RNA-Seq\]\s*", "", regex=True
+            )
+        return data
+
+ 
+    data = _check_experiment_alias(data)
+    data = _check_experiment_title(data)
+    data = _drop_empty_columns(data)
+    data = drop_unneeded(data)
+    data = delete_if_single_values(data, columns_to_keep)
+    data = edit_ENA_fastq_URLs(data)
+    data = edit_study_title(data)
+
+    data.insert(2, "read_length", 0)
+    data.insert(3, "read_type", "")
+    data.insert(4, "species", "")
+    data["species"] = data["organism_name"].replace(constants.species_unalias)
+    
+    
+    # calculate read length (inconsistent and variable)
+    for col in ["run_total_bases", "run_total_spots"]:
+        data[col] = data[col].astype(int)
+    data["run_total_spots"] = [max(x,1) for x in data["run_total_spots"]]
+    data["read_length"] = data["run_total_bases"] / data["run_total_spots"]
+    data["read_length"]  = data["read_length"].round(0).astype(int)
+    
+    data.fillna("", inplace=True)
+    data["library_layout"] = data["library_layout"].str.lower()
+
+    if "ena_fastq_ftp_1" in data.columns and "ena_fastq_ftp_2" in data.columns:
+        mask = (data["library_layout"] == constants.read_type.paired) | (
+            (data["ena_fastq_ftp_1"].str.endswith(".gz"))
+            & (data["ena_fastq_ftp_2"].str.endswith(".gz"))
+        )
+    else:
+        mask = data["library_layout"] == constants.read_type.paired
+    data.loc[mask, "read_length"] = data.loc[mask, "read_length"] / 2
+    data.loc[mask, "read_type"] = constants.read_type.paired
+    data.loc[~mask, "read_type"] = constants.read_type.single
+    data["read_length"] = data["read_length"].round(0).astype(int)
+    if constants.read_type.paired in set(data["read_type"]):
+        data["read_length"] = data["read_length"].astype(str)
+        mask = data["read_type"] == constants.read_type.paired
+        data.loc[mask, "read_length"] = "2x" + data.loc[mask, "read_length"]
+        """
+        check for paired with solo fastq
+        run_accession	fastq_ftp
+        SRR16106149	ftp.sra.ebi.ac.uk/vol1/fastq/SRR161/049/SRR16106149/SRR16106149.fastq.gz
+        SRR16106152	ftp.sra.ebi.ac.uk/vol1/fastq/SRR161/052/SRR16106152/SRR16106152.fastq.gz
+        SRR16106153	ftp.sra.ebi.ac.uk/vol1/fastq/SRR161/053/SRR16106153/SRR16106153.fastq.gz
+        """
+        if set(["ena_fastq_ftp_1", "ena_fastq_ftp_2"]) - set(
+            data.columns
+        ):
+            log_message("\nWarning: paired reads but single FTP file\n")
+            data["sra_fastq_1"] = ""
+            data["sra_fastq_2"] = ""
+            mask = data["read_type"] == constants.read_type.paired
+            for i in [1, 2]:
+                data.loc[mask, f"sra_fastq_{i}"] = (
+                    data["run_accession"] + f"_{i}.fastq"
+                )
+        else:
+            mask = (data["library_layout"] == constants.read_type.paired) & (
+                (data["ena_fastq_ftp_1"] == "") | (data["ena_fastq_ftp_2"] == "")
+            )
+            if mask.any():
+                log_message("\nWarning: paired reads but single FTP file\n")
+                data["sra_fastq_1"] = ""
+                data["sra_fastq_2"] = ""
+                mask = (data["library_layout"] == constants.read_type.paired) & (
+                    (data["ena_fastq_ftp_1"] == "")
+                    | (data["ena_fastq_ftp_2"] == "")
+                )
+                for i in [1, 2]:
+                    data.loc[mask, f"sra_fastq_{i}"] = (
+                        data["run_accession"] + f"_{i}.fastq"
+                    )
+    else:
+        data["read_length"] = data["read_length"].astype(int)
+        data["read_length"] = data["read_length"].astype(str)
+
+    data = dedup_cols(data=data)
+    
+    output_files = []
+    for sp in species:
+            for exp in expt_type:
+                mask = (data["organism_name"] == sp) & (data["library_strategy"] == exp)
+                data_subset = data[mask]
+                output_files.append(outputfile[(sp,exp)])
+                if data_subset.shape[0]:
+                    log_message(f"Writing {data_subset.shape[0]} rows with {exp} data for {sp} to {outputfile[(sp,exp)]}")
+                    data_subset.to_csv(outputfile[(sp,exp)], sep="\t", index=False)
+                    output_files.append(outputfile[(sp,exp)])
+                else:
+                    log_message(f"No metadata from SRA for {exp} data from {sp} in this study.")
+
+    return output_files
+
+'''
+
+ENA can provide some sample info:
+
+    read_experiment for accession PRJNA680934
+        experiment_accession	run_accession	description	study_accession
+        SRX9590782	SRR13150536	Illumina NovaSeq 6000 sequencing: GSM4946391: NC rep2 Homo sapiens RNA-Seq	PRJNA680934
+        SRX9590784	SRR13150538	Illumina NovaSeq 6000 sequencing: GSM4946393: si-EIF5A2 rep1 Homo sapiens RNA-Seq	PRJNA680934
+        SRX9590785	SRR13150539	Illumina NovaSeq 6000 sequencing: GSM4946394: si-EIF5A2 rep2 Homo sapiens RNA-Seq	PRJNA680934
+        SRX9590783	SRR13150537	Illumina NovaSeq 6000 sequencing: GSM4946392: NC rep3 Homo sapiens RNA-Seq	PRJNA680934
+        SRX9590786	SRR13150540	Illumina NovaSeq 6000 sequencing: GSM4946395: si-EIF5A2 rep3 Homo sapiens RNA-Seq	PRJNA680934
+        SRX9590781	SRR13150535	Illumina NovaSeq 6000 sequencing: GSM4946390: NC rep1 Homo sapiens RNA-Seq	PRJNA680934
+        
+study:
+    https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRP294329&result=study
+
+    study_accession	description	secondary_study_accession
+    PRJNA680934	RNA-Seq analysis EIF5A2 knockdown effect on ovarian cancer cells	SRP294329
+
+taxon
+    https://www.ebi.ac.uk/ena/portal/api/filereport?accession=9606&result=taxon
+    tax_id	description
+    9606	Homo sapiens
+
+'''
+
+def get_ENA_fastq_list(ID: str, *, outputdir: File_or_Dir, outputfileprefix: str = constants.file_prefix.ena): #outputfile: File_or_Dir | None = None) -> pd.DataFrame: #delete_temp_output: bool = False):
+    
+    # returns IDs  or  
+    # gets list of ENA fastqs for ID
+    # returns dataframe
+
+    if not (ID.startswith("SRP") or ID.startswith("PRJ")):
+        log_message(f"{ID} may not work. This ENA service needs an SRP or PRJ ID")
+        log_message("For example, try SRP247494.")
+    url = f"https://www.ebi.ac.uk/ena/portal/api/filereport?accession={ID}&result=read_run&fields=run_accession,fastq_ftp"
+
+    #https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRP247494&result=read_run&fields=run_accession,fastq_ftp
+    if  not constants.file_prefix.ena.lower() in outputfileprefix.lower():
+        outputfileprefix = f"{outputfileprefix}_{constants.file_prefix.ena}"
+    outputfile = f"{outputfileprefix}_{ID}.txt"
+    outputfile = os.path.join(outputdir, outputfile)
+
+    check_dir_write_access(outputdir)
+
+    if os.path.exists(outputfile):
+        if os.stat(outputfile).st_size ==  0:
+            log_message(f"Error - {outputfile} is empty.",  exit_now=True)    
+        log_message(f"Reading {outputfile} from previous query.")
+        return pd.read_csv(outputfile, sep="\t", header  = 0), outputfile
+    query = f"wget -q -O - '{url}'"
+    if outputfile:
+        query += f" | tee {outputfile}"
+    log_message(f"Querying ENA for fastq files with:\n\t{query}")
+    data = execute_command(query)
+    if len(data):
+        log_message(f"Retrieved {len(data)-1} records for fastq files")
+        if outputfile:
+            if os.stat(outputfile).st_size ==  0:
+                log_message(f"Error - {outputfile} is empty.",  exit_now=True)    
+            elif os.path.exists(outputfile):
+                log_message(f"Check {outputfile}")
+            else:
+                log_message(f"{outputfile} missing", exit=True)
+        data = [line.rstrip().split("\t") for line in data]
+        data = pd.DataFrame(data[1:], columns =  data[0])
+        return data, outputfile
+    else:
+        log_message(f"No results for {ID} with {query}")
+        return pd.DataFrame(),  None
+
+def reformat_ENA_fastq_list(data: pd.DataFrame, *, outputfile: File_or_Dir|None=None) -> pd.DataFrame:
+    """
+    Reformat so it matches SRA/pysradb columns. We also abbreviate the URL so it's easier to read when we choose  samples.
+
+    run_accession	fastq_ftp
+    SRR12879057	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/057/SRR12879057/SRR12879057_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/057/SRR12879057/SRR12879057_2.fastq.gz
+    SRR12879059	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/059/SRR12879059/SRR12879059.fastq.gz
+    SRR12879062	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/062/SRR12879062/SRR12879062_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/062/SRR12879062/SRR12879062_2.fastq.gz
+    SRR12879068	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/068/SRR12879068/SRR12879068.fastq.gz
     """
 
-def parse_ena_fastq_metadata(*, data):
-    if not isinstance(data, pd.DataFrame):
-        log_message(f"data is a {type(data)} instead of a dataframe")
-        return None
+    #if not isinstance(data, pd.DataFrame):
+    #    log_message(f"data is a {type(data)} instead of a dataframe")
+    #    return None
+
+    if outputfile:
+        exit_if_files_exist(outputfile)
     columns_expected = ["run_accession", "fastq_ftp"]
-    if list(data.columns) != columns_expected:
-        obs = ", ".join(data.columns)
-        exp = ", ".join(columns_expected)
-        log_message(f"Invalid columns: {obs}\nExpected: {exp}")
-        return None
-    data.columns = ["run_accession", "ena_fastq_ftp"]
+    verify_columns_present_in_dataframe(data=data, columns = columns_expected, source="ENA fastq list")
+    if unknown_columns := set(data.columns) - set(columns_expected):
+        log_message("Dropping unknown columns:", *unknown_columns, sep="\n\t")
+        data = data[columns_expected]
+    data.rename(columns = {"fastq_ftp": "ena_fastq_ftp"}, inplace=True)
     mask = data["ena_fastq_ftp"].isna()
     data = data[~mask].copy()
     data["ena_fastq_ftp_1"] = ""
@@ -456,279 +435,368 @@ def parse_ena_fastq_metadata(*, data):
             data[col] = data[col].str.replace("ftp.sra.ebi.ac.uk/", "", regex=False)
     if drop:
         data.drop(columns=drop, inplace=True)
-    return data.reset_index()
-
-
-def get_enafastq_list(study_ID: str, *, delete_temp_output: bool = False):
-    # gets list of ENA fastqs for ID
-    # returns dataframe
-    tempoutputfile = f"ena.{study_ID}.temp"
-    query = f'wget -O {tempoutputfile} "https://www.ebi.ac.uk/ena/portal/api/filereport?accession={study_ID}&result=read_run&fields=run_accession,fastq_ftp"'
-    # https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRP247494&result=read_run&fields=run_accession,fastq_ftp
-    if os.path.exists(tempoutputfile):
-        log_message(f"Using {tempoutputfile}")
-    else:
-        execute_command(query)
-        if not (os.path.exists(tempoutputfile)):
-            log_message(f"No output from {query} for {study_ID}")
-            return None
-    try:
-        data = pd.read_csv(tempoutputfile, sep="\t", header=0, dtype=object)
-    except:
-        log_message(f"Error reading {tempoutputfile}. Query was: {query}")
-        return None
-    data = parse_ena_fastq_metadata(data=data)
-    if data is None:
-        log_message(f"Error parsing {tempoutputfile}. Query was: {query}")
-        return None
-    if delete_temp_output:
-        os.remove(tempoutputfile)
-        log_message(f"Deleted {tempoutputfile}.")
+    data.reset_index(inplace=True)
+    if outputfile:
+        data.to_csv(outputfile, sep="\t", index=False)
+        log_message(f"Reformatted ENA fastq list {outputfile}")
     return data
-
-    """
-    run_accession	fastq_ftp
-    SRR12879058	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/058/SRR12879058/SRR12879058_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/058/SRR12879058/SRR12879058_2.fastq.gz
-    SRR12879060	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/060/SRR12879060/SRR12879060.fastq.gz
-    SRR12879061	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/061/SRR12879061/SRR12879061_1.fastq.gz;ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/061/SRR12879061/SRR12879061_2.fastq.gz
-    SRR12879063	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/063/SRR12879063/SRR12879063.fastq.gz
-    SRR12879064	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/064/SRR12879064/SRR12879064.fastq.gz
-    SRR12879065	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/065/SRR12879065/SRR12879065.fastq.gz
-    SRR12879066	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/066/SRR12879066/SRR12879066.fastq.gz
-    SRR12879067	ftp.sra.ebi.ac.uk/vol1/fastq/SRR128/067/SRR12879067/SRR12879067.fastq.gz
-    """
-
-
-# def pysradb_conversions():
-#    test_executables(exes=["pysradb"], exit_on_error=True)
-
-def pysradb_parse_conversion(data, ID):
-    if data is None:
-        log_message(f"empty pysradb result for {ID}")
-        return ""
-    if not isinstance(data, pd.DataFrame):
-        log_message(f"unexpected type {type(data)} for {ID}:\n{repr(data)}")
-        return ""
-    return data[data.columns[-1]].tolist()[0]
-
-def pysradb_convert_ID(*, fn: str, id: str):
-    """
-    Calls pysradb to convert IDs using a specific
-    fix order:
-    > pysradb gsm-to-gse GSM4679562
-    study_alias	study_accession
-    GSE154783	SRP272683
-    """
-    cmd = f"pysradb {fn} {id}"
-    log_message(cmd)
-    temp = execute_command(cmd)
-
-    prefix = fn[-3:].upper()
-    # print(f"fn {fn} id {id} prefix {prefix}")
-    if len(temp) == 2:
-        new_ids = temp[-1].rstrip().split()
-        # new_id = temp[-1].rstrip().split()[1]
-        for new_id in new_ids:
-            if new_id.startswith(prefix):
-                log_message(f"{id} => {new_id}")
-                return new_id
-    temp = "\n".join(temp)
-    log_message(f"Invalid output:\n{temp}")
-    return None
-
 
 def transpose_nested_list(*, data: list):
     # M x N list becomes N x M
     return [list(x) for x in zip(*data)]
 
 
-def get_matrix_files_for_geo_series(geo_id: str, *, retrieve_matrix_files: bool = True):
-    if not geo_id:
+def  test_URL(url):
+    # requests library doesn't cope with ftp
+    # direct version: wget --spider -O - 'https://wwww....' 2>&1 |grep 'Remote file exists.' 
+
+    if response := execute_command(f"wget --spider {url}", splitlines=False):
+        if "Remote file exists" in response:
+            return True
+    return False
+
+def get_GEO_metadata(ID: str, outputdir: File_or_Dir, outputfileprefix: str = constants.file_prefix.geo)-> File_or_Dir:
+    if not re.match(r"GSE\d+$", ID):
         log_message("Species a series  ID e.g. GSE154891", exit_now=True)
     # input = GEO series ID, e.g. GSE154891
-    # retrieves info for that GEO series: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE154891
-    matrix_files = []
-    url = f"https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={geo_id}"
-    log_message(f"fetching {url}")
-    ftp = ""
-    for line in execute_command(f"wget -O - {url}"):
-        if m := re.search(r'.+(ftp:.*?)".+Series Matrix File', line):
-            ftp = m.groups()[0]
-            print(ftp)
-            break
-    if not ftp:
-        log_message(f"No series matrix file found in {url}")
-        return
-    url = ftp
-    ftp = ""
-    log_message(f"fetching {url}")
-    for line in execute_command(f"wget -O - {url}"):
-        if m := re.search(r'.+(ftp:.*?)".+_series_matrix', line):
-            ftp = m.groups()[0]
-            print(ftp)
-            break
-    if not ftp:
-        log_message(f"No series matrix file found in {url}")
-        return
-    log_message(f"fetching {ftp}")
-    cmd = f"wget --quiet --no-clobber {ftp} 2> /dev/null"
-    log_message(f"executing {cmd}")
-    execute_command(cmd)
-    file = os.path.basename(ftp)
-    if os.path.exists(file):
-        log_message(f"Retrieved {file}")
-        matrix_files.append(file)
-    else:
-        log_message(f"Failed to retrieve {file} with {cmd}")
-    return matrix_files
+    # retrieves info for that GEO series:
+    # GEO series home page - has links to author-submitted and NCBI counts (direct), indirect to matrix page
+    # https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE154891
 
-def make_row_headers_unique(data: list[list]):
-    # input list of lists
-    # makes first column IDs unique by adding 1, 2 etc. if repeated
-    # assert isinstance(data, list), "data is not a list"
-    # assert all(isinstance(x, list) for x in data), "data is not a list of lists"
+    # direct:https://ftp.ncbi.nlm.nih.gov/geo/series/GSE162nnn/GSE162198/matrix/
+    # https://ftp.ncbi.nlm.nih.gov/geo/series/GSE239nnn/GSE239889/matrix/
 
-    ctr = Counter([row[0] for row in data])
-    repeat = {x: 1 if y > 1 else 0 for (x, y) in ctr.items()}
-    for i, row in enumerate(data):
-        id = row[0]
-        if repeat[id]:
-            data[i][0] = f"{id}_{repeat[id]}"
-            repeat[id] += 1
-    return data
+    check_dir_write_access(outputdir)
+    if os.path.basename(outputfileprefix) != outputfileprefix:
+        log_message("Output file prefix cannot include directory", exit_now=True)
+
+    matrix_page = f"https://ftp.ncbi.nlm.nih.gov/geo/series/{ID[:-3]}nnn/{ID}/matrix"
+    matrix_file_urls = []
+    for line in execute_command(f"wget -O  - -q {matrix_page}"):
+        line = line.rstrip()
+        if "series_matrix.txt.gz" in line:
+            temp = line.split('"')[1]
+            if temp.startswith("GSE") and temp.endswith(".gz"):
+                 matrix_file_urls.append(f"{matrix_page}/{temp}")
+            else:
+                 log_message(f"Parsing error in {line} from {matrix_page}.", exit_now=True)
+            # https://ftp.ncbi.nlm.nih.gov/geo/series/GSE239nnn/GSE239889/matrix/GSE239889-GPL24247_series_matrix.txt.gz
+    local_files = []
+    for url in matrix_file_urls:
+        local_gz = os.path.join(outputdir, os.path.basename(url))
+        local_file = local_gz.rstrip(".gz")
+        if os.path.exists(local_file):
+            pass
+            #log_message(f"{local_file} present")
+            #local_files.append(local_file)
+        elif os.path.exists(local_gz):
+            log_message(f"{local_gz} present")
+            execute_command(f"gunzip {local_gz}")
+        else:
+            
+            #log_message(f"calling {cmd}")
+            execute_command(cmd = f"wget -P {outputdir} {url}")
+            execute_command(f"gunzip {local_gz}")
+        if os.path.exists(local_file):
+            local_files.append(local_file)
+        else:
+            log_message(f"Download or gunzip error for {url} - {local_gz} not found", exit_now=True)
+    return local_files
+
+def get_NCBI_counts(GEO_ID: str, outputdir: File_or_Dir): #, destdir: File_or_Dir | None = None):
     """
-    input:
-        Sample_characteristics
-        Sample_characteristics
-        Sample_characteristics
+    This function outputs a Bash script to retrieve files from NCBI. It does not retrieve the files.
+    The Bash script doesn't retrieve the files directly. It outputs the commands so that they can be filtered on the fly.
+    The commands are all generated by a function, so that this behavior is easy to change.
+   
+    GEO download pages have a consistent format. It's silly to parse them repeatedly.
+    
+    Example:
+        Source: https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE162198
 
-    output:
-        Sample_characteristics_1
-        Sample_characteristics_2
-        Sample_characteristics_3
+        /geo/download/?type=rnaseq_counts&acc=GSE162198&format=file&file=GSE162198_raw_counts_GRCh38.p13_NCBI.tsv.gz
+        /geo/download/?type=rnaseq_counts&acc=GSE162198&format=file&file=GSE162198_norm_counts_FPKM_GRCh38.p13_NCBI.tsv.gz
+        /geo/download/?type=rnaseq_counts&acc=GSE162198&format=file&file=GSE162198_norm_counts_TPM_GRCh38.p13_NCBI.tsv.gz
+        /geo/download/?format=file&type=rnaseq_counts&file=Human.GRCh38.p13.annot.tsv.gz
 
+    This breaks down to:
+
+        base_URL="https://www.ncbi.nlm.nih.gov/geo/download"
+        {base_URL} / ? type=rnaseq_counts & acc={GEO_ID} & format=file & file= {GEO_ID}_raw_counts_GRCh38.p13_NCBI.tsv.gz
+        {base_URL} / ? type=rnaseq_counts & acc={GEO_ID} & format=file & file= {GEO_ID}_norm_counts_FPKM_GRCh38.p13_NCBI.tsv.gz
+        {base_URL} / ? type=rnaseq_counts & acc={GEO_ID} & format=file & file= {GEO_ID}_norm_counts_TPM_GRCh38.p13_NCBI.tsv.gz
+        {base_URL} / ? type=rnaseq_counts                & format=file & file= Human.GRCh38.p13.annot.tsv.gz
     """
-
-def bash_header(*, flags: str = "set -e"):
-    return dedent(f"""
-        #!/bin/bash
-        {flags}
-        log() {{ echo "$*" >&2 ; }}
-        die() {{ echo "$*" >&2; exit 1 ; }}
-    """).lstrip()
-
-
-def get_ncbi_recount_data(GEO_ID: str):
-    #ncbi_file = f"{GEO_ID}_raw_counts_GRCh38.p13_NCBI.tsv.gz"
-    script = f"get_ncbi_recount_{GEO_ID}.sh"
+    script = os.path.join(outputdir, f"{constants.geo_fetch_NCBI_counts}{GEO_ID}.sh")
     if os.path.exists(script):
         log_message(f"{script} exists for {GEO_ID}")
         return
-    """
-    for i in [ncbi_file, script, ncbi_file.replace(".gz", "")]:  #  spider_log_file
-        if os.path.exists(i):
-            log_message(f"{i} is already present for {GEO_ID}")
-            return
-    """
+    
+    check_dir_write_access(outputdir)
     # may not exist
-    baseurl = f"https://www.ncbi.nlm.nih.gov/geo/download/?acc={GEO_ID}"
+    
+    download = "https://www.ncbi.nlm.nih.gov/geo/download/?"
+    acc = download + f"acc={GEO_ID}"
+    response = execute_command(f'wget -O - "{acc}"', splitlines=False)
+    if not "Gene Expression Omnibus" in response:
+        log_message(f"Failed to locate {GEO_ID} with {acc}")
+        return
+    if not "NCBI-generated data" in response:
+        log_message(f"No NCBI-generated data located for {GEO_ID} with {acc}.")
+        return
+    #if not test_URL(acc):
+    #   invalid test - GEO responds even with GSE342nnn
+    #    log_message(f"Download page not found for {GEO_ID} at {acc}", exit_now=True)
+    output = [dedent(f"""
+        #!/bin/bash
+        # set -e
+        # 
+        # This script fetches gene expression counts and derived values (TPM and FPKM) generated by GEO staff, assuming they exist for the series (GSE..)
+        # Here is an explanation of the effort: https://www.ncbi.nlm.nih.gov/geo/info/rnaseqcounts.html
+        # The comments below were copied from the page linked above.
+        # You can find an example here: https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE162198
+        # 
+        #my_dir=$(dirname $(readlink -f ${{BASH_SOURCE}}))
+        my_dir=$(dirname ${{BASH_SOURCE}})
+        base_URL=
+        GEO_series="{GEO_ID}"
+        acc="${{GEO_series}}&"
+        download_file="https://www.ncbi.nlm.nih.gov/geo/download/?type=rnaseq_counts&format=file"
+        download_series_file="${{download_file}}&acc=${{GEO_series}}"
+        
+        go() {{
+            file=$1
+            url=$2
+            echo ""
+            echo "# $file"
+            echo ""
+            local_file=${{my_dir}}/${{file}}
+
+            if [[ -e ${{local_file}} ]]; then 
+                echo "${{local_file}} exists" >&2
+            else
+                if [[ -e ${{local_file}}.gz ]]; then
+                    echo "${{local_file}}.gz exists" >&2
+                else
+                    echo "wget --no-clobber --quiet -O ${{local_file}}.gz \\"${{url}}&file=${{file}}.gz\\" && sleep 1"
+                fi
+                echo "gunzip --keep ${{local_file}}.gz"
+            fi
+        }}
+
+        # Series RNA-seq raw counts matrix
+        # Raw count matrices may be suitable for input into differential expression analysis tools.
+        go "${{GEO_series}}_raw_counts_GRCh38.p13_NCBI.tsv" ${{download_series_file}}
+
+        # Series RNA-seq normalized counts matrix
+        # Normalized count matrices may be suitable for analyzing and visualizing gene expression abundance.
+        go "${{GEO_series}}_norm_counts_FPKM_GRCh38.p13_NCBI.tsv" ${{download_series_file}}
+        go "${{GEO_series}}_norm_counts_TPM_GRCh38.p13_NCBI.tsv" ${{download_series_file}}
+
+        # Human gene annotation table
+        go Human.GRCh38.p13.annot.tsv ${{download_file}}
+    """).lstrip()]
+    with open(script, "w") as tempout:
+        print(*output, sep="\n", file=tempout)
+        os.chmod(script, 0o755)
+        log_message(f"Created {script}")
+
+    """
+    baseurl = f"{download}/?acc={GEO_ID}"
+
     ncbi_counts = []
-    for line in execute_command(f'wget -q -O - "{baseurl}"'): # | grep NCBI.tsv.gz | grep counts_'
+    #response = execute_command(f'wget -q -O - "{baseurl}"', splitlines=False)
+    response = requests.get(baseurl)
+    """
+    """
+    >>> type(response.content)
+    <class 'bytes'>
+    >>> type(response.text)
+    <class 'str'>
+    >>> 
+    """
+    """
+    tree = html.fromstring(response.content)
+    urls = [x[2] for x in list(tree.iterlinks())]
+    ncbi_counts = list(filter(lambda row: "rnaseq_counts" in row, urls))
+    ncbi_counts = [x.replace("/geo/download/","") for x in ncbi_counts]
+    
+    for line in :
         if m := re.search(r'href="(.*?NCBI.tsv.gz)"', line):
             # /geo/download/?type=rnaseq_counts&amp;acc=GSE215024&amp;format=file&amp;file=GSE215024_raw_counts_GRCh38.p13_NCBI.tsv.gz
             ncbi_counts.append(m.groups()[0])
-        """
-        if "NCBI.tsv.gz"
-        for p in line.split('"'):
-            if p.endswith("NCBI.tsv.gz"):
-                out = p.split("=")[-1]
-                ncbi.append(f'wget -nc -O {out} "https://www.ncbi.nlm.nih.gov{p}"')
-        """
-    # execute_command(test_cmd, suppress_error_messages=True)
-    # supply = execute_command(f'grep -i -P "length|size"  {spider_log_file}')
     if not ncbi_counts:
         log_message(f"No counts files were found for {GEO_ID} at {baseurl}")
         return
-    output = ["#!/bin/bash\n"]
+    """
+    """
     for f in ncbi_counts:
         file = f.split("=")[-1]
-        output.append(f"wget --no-clobber -q -O {file } 'https://www.ncbi.nlm.nih.gov{f}'")
-    with open(script, "w") as tempout:
-        print("\n".join(output), file=tempout)
-        os.chmod(script, 0o755)
-        log_message(f"source {script}")
-    
-
-def geo_parse_matrix_file(matrix_file: FileName):
-    # input = name of a series matrix file
-    # output = a dataframe with sample-specific info and a dataframe with common entries
-
-    matrix_file = matrix_file.replace(".gz", "")
-    gz = matrix_file + ".gz"
-    if not os.path.exists(matrix_file):
-        if os.path.exists(gz):
-            execute_command(f"gunzip --keep {gz}")
-    verify_that_paths_exist(matrix_file)
+        output.append(f"wget --no-clobber -q -O {file} 'https://www.ncbi.nlm.nih.gov{f}'")
     """
-    cmd = {"gz": "zcat", "txt": "cat"}.get(matrix_file.split(".")[-1], "")
-    if not cmd:
-        log_message(f"Unknown extension in {matrix_file} - skipping")
-        return None, None
-    temp = execute_command(f"{cmd} {matrix_file} | grep ^.Sample 2> /dev/null")
-    if not temp:
-        log_message(f"No sample info found in {matrix_file}")
-        return None, None
-    """
-    sample_info  = []
-    with open(matrix_file, "r") as tempin:
+
+def matrix_to_dataframe(inputfile):
+    all_data  = []
+    entities = set()
+    with open(inputfile, "r") as tempin:
         for line in tempin:
-            if line.startswith("!Sample"):
-                sample_info.append(line.lstrip("!").rstrip().replace('"', "").split("\t"))
+            tabs = line[1:].split("\t", 1)
+            if len(tabs) > 1:
+                entity, info = tabs[0].split("_", 1)
+                entities.add(entity)
+                all_data.append([entity,  info, tabs[1].rstrip().replace('"', '').split("\t")])
+    data_by_entity = {}
+    for ent in entities:
+        data_by_entity[ent] = list(filter(lambda row: row[0] == ent, all_data))
+    sample_data = data_by_entity["Sample"]
+    test = [x[1] for x in sample_data]
+    exclude = set()
+    skip_if_match = "channel_count data_row_count platform_id status type growth_protocol".split(" ")
+    skip = "channel_count data_row_count platform_id status type growth_protocol".split(" ")
+    skip_if_contain = "contact extract_protocol growth_protocol _date".split(" ")
+    for i in test:
+        if any(i in s for s in skip_if_match):
+            exclude.add(i)
+            continue
+        if any(s in i for s in skip_if_contain):
+            exclude.add(i)
+            continue
+    sample_data  = [x for x in sample_data if not x[1] in exclude]
 
-    #sample_info = [x.lstrip("!").rstrip().replace('"', "").split("\t") for x in temp]
-    columns_to_drop = "Sample_relation Sample_contact_name Sample_contact_institute Sample_contact_address Sample_contact_city Sample_contact_state Sample_contact_zip/postal_code Sample_contact_country Sample_taxid_ch1 Sample_platform_id Sample_status Sample_submission_date Sample_last_update_date Sample_type Sample_data_processing Sample_growth_protocol Sample_contact_email Sample_contact_laboratory Sample_contact_department Sample_treatment_protocol Sample_extract_protocol".split()
-    for row in sample_info:
-        if row[0] == "Sample_channel_count":
-            temp = set(row[1:])
-            if len(temp) == 1 and list(temp)[0] == "1":
-                columns_to_drop = [x.replace("_ch1", "") for x in columns_to_drop]
-                columns_to_drop.append("Sample_channel_count")
-                for i, sample in enumerate(sample_info):
-                    sample_info[i][0] = sample[0].replace("_ch1", "")
-            break
-    sample_info = [row for row in sample_info if not (row[0] in columns_to_drop)]
+    for i, row in enumerate(sample_data):
+        sample_data[i][1] = sample_data[i][1].replace("_ch1", "")
+    sample_data = [x[1:] for x in sample_data]
     variable_columns = []
     common_columns = []
-    for row in sample_info:
-        values = set(row[1:])
-        if len(values) == 1:
-            val = list(values)[0]
+    for row in sample_data:
+        values = Counter(*row[1:])
+        if len(values.keys()) == 1:
+            val = list(values.keys())[0]
             if not (val in ["None", "NONE", "0"]):
                 common_columns.append(row)
-                # common_columns.append(f"{row[0]}\t{val}")
         else:
             variable_columns.append(row)
 
-    sample_info = variable_columns + common_columns
-    # Sample_characteristics	cell type: iPSC
-    # Sample_characteristics	condition: Control
-    for i, row in enumerate(sample_info):
-        if row[0] == "Sample_characteristics":
-            temp = row[1].split(": ", 1)
-            if len(temp) == 2:
-                check = temp[0] + ": "
-                if all((x.startswith(check) or x == "") for x in row[2:]):
-                    sample_info[i][0] = temp[0].replace(" ", "_")
-                    for j in range(1, len(row)):
-                        sample_info[i][j] = sample_info[i][j].replace(check, "")
+    info = variable_columns + common_columns
+    for i, row in enumerate(sample_data):
+        if row[0].startswith("characteristics"):
+            h = set([x.split(": ")[0] for x in row[1]])
+            if len(h) == 1:
+                sample_data[i][0] = h.pop().replace(" ","_")
+                for j, r in enumerate(row[1]):
+                    sample_data[i][1][j] = r.split(": ")[1]
+    sample_data = unique_row_headers(sample_data)
+    sample_data = [[x[0]] + x[1] for x in sample_data]
+    temp = transpose_nested_list(data=sample_data)
+    return  pd.DataFrame(temp[1:], columns=temp[0])
+    
+def parse_GEO_matrix_files(inputfiles): #, *, species: str|list[str], expt_type: str|list[str], outputfileprefix: str = constants.file_prefix.geo, overwrite: bool=False):
+    # input = name of a series matrix file
+    # output = a dataframe with sample-specific info and a dataframe with common entries
+    return_data =[]
+    return_files = []
+    """
+    if isinstance(species, str):
+        species = [species]
+    if isinstance(expt_type, str):
+         expt_type = [expt_type]
+    """
+    for matrix_file in inputfiles:
+        matrix_file = matrix_file.replace(".gz", "")
+        gz = f"{matrix_file}.gz"
+        if (not os.path.exists(matrix_file)) and os.path.exists(gz):
+            execute_command(f"gunzip {gz}")
+        verify_that_paths_exist(matrix_file)
+        data = matrix_to_dataframe(matrix_file)
+        verify_columns_present_in_dataframe(data=data, columns=["organism", "library_strategy"], source=matrix_file)
+        for org in data["organism"].unique().tolist():
+            for assay in data["library_strategy"].unique().tolist():
+                outputfile = "_".join([matrix_file.replace(".txt",""), constants.species_unalias[org], assay]) + ".txt"
+                mask = (data["organism"] == org) & (data["library_strategy"] == assay)
+                tempdata = data[mask].copy()
+                print(f"{matrix_file} {org} {assay} {tempdata.shape[0]}")
+                tempdata.to_csv(outputfile, sep="\t", index=False)
+                log_message(f"Input matrix:\n\t{matrix_file}\nconverted to:\n\t{outputfile}\nfor {org} and {assay}")
+                return_data.append(tempdata)
+                return_files.append(outputfile)
 
-    a = make_row_headers_unique(data=sample_info)
-    b = transpose_nested_list(data=a)
+    return return_data, return_files
+
+    """
+        all_data  = []
+        entities = set()
+        with open(matrix_file, "r") as tempin:
+            for line in tempin:
+                tabs = line[1:].split("\t", 1)
+                if len(tabs) > 1:
+                    entity, info = tabs[0].split("_", 1)
+                    entities.add(entity)
+                    all_data.append([entity,  info, tabs[1].rstrip().replace('"', '').split("\t")])
+        data_by_entity = {}
+        for ent in entities:
+            data_by_entity[ent] = list(filter(lambda row: row[0] == ent, all_data))
+        sample_data = data_by_entity["Sample"]
+        test = [x[1] for x in sample_data]
+        exclude = set()
+        skip_if_match = "channel_count data_row_count platform_id status type growth_protocol".split(" ")
+        skip = "channel_count data_row_count platform_id status type growth_protocol".split(" ")
+        skip_if_contain = "contact extract_protocol growth_protocol _date".split(" ")
+        for i in test:
+            if any(i in s for s in skip_if_match):
+                exclude.add(i)
+                continue
+            if any(s in i for s in skip_if_contain):
+                exclude.add(i)
+                continue
+        sample_data  = [x for x in sample_data if not x[1] in exclude]
+ 
+        for i, row in enumerate(sample_data):
+            sample_data[i][1] = sample_data[i][1].replace("_ch1", "")
+        sample_data = [x[1:] for x in sample_data]
+        variable_columns = []
+        common_columns = []
+        for row in sample_data:
+            values = Counter(*row[1:])
+            if len(values.keys()) == 1:
+                val = list(values.keys())[0]
+                if not (val in ["None", "NONE", "0"]):
+                    common_columns.append(row)
+            else:
+                variable_columns.append(row)
+
+        info = variable_columns + common_columns
+        for i, row in enumerate(sample_data):
+            if row[0].startswith("characteristics"):
+                h = set([x.split(": ")[0] for x in row[1]])
+                if len(h) == 1:
+                    sample_data[i][0] = h.pop().replace(" ","_")
+                    for j, r in enumerate(row[1]):
+                        sample_data[i][1][j] = r.split(": ")[1]
+        sample_data = unique_row_headers(sample_data)
+        sample_data = [[x[0]] + x[1] for x in sample_data]
+        temp = transpose_nested_list(data=sample_data)
+        out = pd.DataFrame(temp[1:], columns=temp[0])
+        out.to_csv("yo", sep="\t")
+        print(b)
+        sys.exit()
+        
     return  pd.DataFrame(b[1:], columns=b[0])
+    """
+
+
+"""
+
+        script = f"{constants.geo_fetch_author_supp}_{ID}.sh"
+        geo_find_supplementary_files(files=matrix_files, outputfile=script)
+
+
+
+"""
+
 
 
 def geo_find_supplementary_files(
-    *, files: list[FileName], outputfile: FileName, overwrite: bool = False
+    *, files: list[File_or_Dir], outputfile: File_or_Dir, overwrite: bool = False
 ):
     # input = list of series matrix files
     # output = bash script to retrieve any supplementary files, or None if None
@@ -766,54 +834,29 @@ def geo_find_supplementary_files(
     if output:
         output  = [bash_header()] + output
         with open(outputfile, "w") as tempout:
-            print("\n".join(output), file=tempout)
+            print(*output, sep="\n", file=tempout)
         os.chmod(outputfile, 0o755)
         log_message(f"source {outputfile} &")
         return outputfile
     else:
         return None
 
-
 def geo(args):
+
     convert_functions = set("""
-        gse-to-gsm
-        gse-to-srp
-        gsm-to-gse
-        gsm-to-srp
-        gsm-to-srr
-        gsm-to-srs
-        gsm-to-srx
-        srp-to-gse
-        srp-to-srr
-        srp-to-srs
-        srp-to-srx
-        srr-to-gsm
-        srr-to-srp
-        srr-to-srs
-        srr-to-srx
-        srs-to-gsm
-        srs-to-srx
-        srx-to-gsm
-        srx-to-srp
-        srx-to-srr
-        srx-to-srs
+        gse-to-gsm gse-to-srp gsm-to-gse gsm-to-srp gsm-to-srr gsm-to-srs gsm-to-srx 
+        srp-to-gse srp-to-srr srp-to-srs srp-to-srx srr-to-gsm srr-to-srp srr-to-srs 
+        srr-to-srx srs-to-gsm srs-to-srx srx-to-gsm srx-to-srp srx-to-srr srx-to-srs
     """.split())
 
     direct_to_srp = {x.split("-to-")[0] : x for x in convert_functions if x.endswith("srp")}
-    # {'srx': 'srx_to_srp', 'gsm': 'gsm_to_srp', 'gse': 'gse_to_srp', 'srr': 'srr_to_srp'}
     direct_to_gse = {x.split("-to-")[0] : x for x in convert_functions if x.endswith("gse")}
-    # {'srp': 'srp_to_gse', 'gsm': 'gsm_to_gse'}
-
     skip = [x for x in convert_functions if x.startswith("gse")]
     convert_functions -= set(skip)
     convert_functions -= set([x for x in convert_functions if  x.split("-to-")[0] in direct_to_gse])
-    # srp_to_gse  srp_to_srr  srp_to_srs  srp_to_srx  gsm_to_gse  gsm_to_srp  gsm_to_srr  gsm_to_srs  gsm_to_srx
     intermediates = set([x for x in convert_functions if  x.split("-to-")[1] in direct_to_gse])
-    # srr_to_gsm     srr_to_srp    srx_to_gsm     srx_to_srp     srs_to_gsm
     indirects = set([x.split("-to-")[0] for x in intermediates])
-    # {'srr', 'srx', 'srs'}
     paths_to_try = {x: [i for i in intermediates  if i.split("-to-")[0] == x] for x in indirects}
-    # {'srr': ['srr_to_srp', 'srr_to_gsm'], 'srx': ['srx_to_gsm', 'srx_to_srp'], 'srs': ['srs_to_gsm']}
 
     #    db = SRAweb()
     #db.methods
@@ -868,19 +911,19 @@ def geo(args):
         if src != "gse":
             log_message(f"skipping {id_succession[0]} - no GSE ID")
             continue
-        get_ncbi_recount_data(GEO_ID=ID)
+        get_NCBI_counts(GEO_ID=ID)
         outputfile = f"{ID}{outputfileext}"
         if os.path.exists(outputfile):
             log_message(f"skipping {ID} - output file {outputfile} exists")
             continue
-        matrix_files = get_matrix_files_for_geo_series(geo_id=ID)
+        matrix_files = get_GEO_series_metadata_files(geo_id=ID)
 
-        script = f"get_supplementary_files_from_geo_{ID}.sh"
+        script = f"{constants.geo_fetch_author_supp}_{ID}.sh"
         geo_find_supplementary_files(files=matrix_files, outputfile=script)
         if problematic := [x for x in matrix_files if not ("_series_matrix" in x)]:
-            temp = "\n".join(problematic)
+            #temp = "\n".join(problematic)
             log_message(
-                f"_series_matrix not found in all matrix files:\n{temp}", exit_now=True
+                "_series_matrix not found for matrix files:", *problematic, sep="\n\t", exit_now=True
             )
         subseries = [a.split("_series_matrix")[0] for a in matrix_files]
         if len(matrix_files) == 1:
@@ -893,10 +936,13 @@ def geo(args):
             SRP = ""
         else:
             if len(srp_ids_found) > 1:
-                log_message(f"Multiple SRP IDs were found for {id_succession[0]}:\n" + "\n".join(srp_ids_found))
-            SRP = srp_ids_found[0]
+                SRP = srp_ids_found[0]
+                log_message(f"Caution - multiple SRP IDs were found for {id_succession[0]}:",  *srp_ids_found,  sep="\n\t")
+                log_message(f"Using {SRP}")
+
         for i, file in enumerate(matrix_files):
-            metadata = geo_parse_matrix_file(file)
+
+            metadata = matrix_to_dataframe(file)
             metadata.insert(0, "study", id)
             metadata.insert(1, "SRP", SRP)
             metadata.insert(2, "source_", subseries[i])
@@ -904,7 +950,7 @@ def geo(args):
             metadata.to_csv(output_files[i], sep="\t", index=False)
             log_message(f"Metadata written to {output_files[i]}")
         if SRP:
-            SRP = pysradb_convert_ID(fn="gse-to-srp", id=id)
+            SRP = pySRAdb_convert(fn="gse-to-srp", id=id)
             log_message(f"SRP for {id} is {SRP}")
             sra_output = f"{SRP}.sra.txt"
             if not os.path.exists(sra_output):
@@ -924,7 +970,7 @@ def geo(args):
                     sra_column = list(matching)[0]
                     for outputfile in output_files:
                         temp = f'{outputfile.replace(".txt", "")}.{SRP}.txt'
-                        cmd = f"{__file__} join -i {outputfile} {sra_output} -c Sample_geo_accession {sra_column} -o {temp}"
+                        cmd = f"{__file__} join -i {outputfile} {sra_output} -c geo_accession {sra_column} -o {temp}"
                         execute_command(cmd)
                         if os.path.exists(temp):
                             log_message(f"GEO + SRA => {temp}")
@@ -933,290 +979,11 @@ def geo(args):
                 else:
                     log_message(f"No matched columns in {outputfile} and {sra_output}")
 
-def enafastqs(args):
-    # get list of ena fastqs for one or more IDs
-    # called from command line
-    # for a single ID, outputs list to a file or stdout
-    # for multiple IDs, creates an output file for each ID
-    outputfiles = {ID: f"{ID}.samples.{args.EXT}" for ID in args.IDS}
-    exit_if_files_exist(list(outputfiles.values()))
-    for study, outputfile in outputfiles.items():
-        data = get_enafastq_list(study_ID=study, delete_temp_output=delete_temp_files)
-        if os.path.exists(outputfile):
-            log_message(f"{outputfile} exists - skipping {id}")
-        else:
-            data.to_csv(outputfile, sep="\t", index=False)
-            log_message(f"{outputfile} created for {study}")
-    # tempoutputfile = f"ena.{id}.temp"
-    # execute_command(f"wget -O {tempoutputfile} \"https://www.ebi.ac.uk/ena/portal/api/filereport?accession={id}&result=read_run&fields=run_accession,fastq_ftp\"")
-    # https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRP247494&result=read_run&fields=run_accession,fastq_ftp
-    # outputfile = args.OUTPUTFILE
-    """
-    if len(ids) > 1:
-        if outputfile:
-            log_message(f"For multiple IDs, specify only {arg_def.EXT}.", exit_now=True)
-        if not outputfileext:
-            log_message(f"For multiple IDs, specify {arg_def.EXT}.", exit_now=True)
-        outputfiles = {id : f"{id}.{outputfileext}" for id in ids}
-    else:
-        id = ids[0]
-        outputfiles = {id : outputfile or f"{id}.{outputfileext}"}
-    """
+
+#parsed = parse_pySRA_output(data, species=species, expt_type = expt_type)
 
 
-def sra_simplify_exp_desc(x):
-    # GSM4503604: NSC-CB660-TERT sgTP53 + sgCDKN2A + sgPTEN +sgNF1 CLONE 1 replicate 1; Homo sapiens; RNA-Seq
-    desc = str(x["experiment_title"])
-    for col in set(["organism_name", "library_strategy"]) & (set(x.keys())):
-        temp = "; " + str(x[col])
-        desc = re.sub(temp, "", desc)
-    for col in set(["library_name", "experiment_alias"]) & (set(x.keys())):
-        temp = str(x[col]) + ": "
-        desc = re.sub(temp, "", desc)
-    desc = re.sub(" ", "_", desc)
-    # log_message(f"{keep}:{desc}")
-    return desc
-
-def pysradb(args):
-    test_executables("pysradb")
-    ids = args.IDS
-    #pysradb gsm-to-gse GSM2177186
-    outputfile = args.OUTPUTFILE
-    if outputfile:
-        if len(ids) > 1:
-            log_message(
-                f"For multiple IDs, specify only --ext",
-                exit_now=True,
-            )
-        outputfiles = {ids[0]: outputfile}
-    else:
-        outputfiles = {id: f"{id}{args.EXT}" for id in ids}
-    overwrite = args.OVERWRITE
-    if overwrite is False:
-        exit_if_files_exist(list(outputfiles.values()))
-    delete_temp_files = not args.KEEPTEMPFILES
-    """
-    if len(ids) > 1:
-        if outputfile:
-            log_message(f"For multiple IDs, specify only {arg_def.EXT}.", exit_now=True)
-        if not ext:
-            log_message(f"For multiple IDs, specify {arg_def.EXT}.", exit_now=True)
-        outputfiles = {id : f"{id}.{ext}" for id in ids}
-    else:
-        id = ids[0]
-        outputfiles = {id : outputfile or f"{id}.{ext}"}
-    """
-    db = SRAweb()
-
-    for study_ID, outputfile in outputfiles.items():
-        # if os.path.exists(outputfile) and delete_temp_files is False and overwrite is False:
-        #    log_message(f"{outputfile} exists - skipping {id}")
-        #    continue
-        #data = get_sra_metadata(id=id, delete_temp_output=delete_temp_files)
-        data = db.sra_metadata(study_ID, detailed=True)
-        if data is None or data.shape[0] == 0:
-            log_message(f"No data from SRA for {study_ID}")
-            continue
-        columns = list(set(["strategy", "library_strategy"]) & set(data.columns))
-        if len(columns) == 0:
-            log_message(f"No strategy or library_strategy for {study_ID}")
-            continue
-        if len(columns) > 1:
-            log_message(f"Multiple strategy columns for {study_ID}")
-            continue
-        types = data[columns[0]].unique().tolist()
-        mask = data[columns[0]] == "RNA-Seq"
-        data = data[mask].copy()
-        if data.empty:
-            log_message(f"No RNA-seq data for {study_ID} but: " + ", ".join(types))
-            continue
-        for col in ["run_total_bases", "run_total_spots"]:
-            data[col] = data[col].astype(int)
-        data.insert(4, "read_length_temp", 0)
-        data["read_length_temp"] = data["run_total_bases"] / data["run_total_spots"]
-        #data["read_length_temp"] = data.apply(lambda x: x["run_total_bases"] / x["run_total_spots"], axis=1)
-        data["library_layout"] = data["library_layout"].str.lower()
-        columns_to_reduce = (
-            "study_accession organism_name library_strategy library_layout".split()
-        )
-        # drop empty columns
-        if empty_columns := [x for x in data.columns if all(data[x].isna()) or all(data[x] == "missing")]:
-            data.drop(columns=empty_columns, inplace=True)
-        columns_to_drop = """
-            experiment_accession sample_accession experiment_desc library_source library_selection instrument instrument_model
-            instrument_model_desc run_alias public_filename public_size public_date public_md5 public_version public_semantic_name
-            public_supertype public_sratoolkit aws_url aws_free_egress aws_access_type public_url ncbi_url ncbi_free_egress 
-            ncbi_access_type gcp_url gcp_free_egress gcp_access_type organism_taxid
-        """.split()
-        if "study_title" in data.columns:
-            data["study_title"] = data["study_title"].str.replace(
-                r"\s*\[RNA-Seq\]\s*", "", regex=True
-            )
-        if "experiment_alias" in data.columns:  # GSM
-            mask = data["experiment_alias"].isna()
-            tempdata = data[mask]
-            if tempdata.shape[0]:
-                temp = "\n".join(tempdata["run_accession"])
-                log_message(f"Missing experiment_alias:\n{temp}")
-            tempdata = data[~mask]
-            temp = list(tempdata["experiment_alias"])
-            if len(temp) != len(set(temp)):
-                temp = "\n".join(temp)
-                log_message(f"Non-unique experiment_alias:\n{temp}")
-            if "run_alias" in data.columns:
-                if list(data["run_alias"]) == list(
-                    [f"{x}_r1" for x in data["experiment_alias"]]
-                ):
-                    columns_to_drop.append("run_alias")
-
-        if "experiment_title" in data.columns:
-            for col in set(["experiment_desc", "library_name"]) & set(data.columns):
-                if list(data[col]) == list(data["experiment_title"]):
-                    columns_to_drop.append(col)
-            data["experiment_title"] = data.apply(
-                lambda x: sra_simplify_exp_desc(x), axis=1
-            )
-
-        if columns_to_drop := set(columns_to_drop) & set(data.columns):
-            data.drop(columns=list(columns_to_drop), inplace=True)
-        columns_to_drop = []
-        columns_to_shift = []
-        # columns_to_reduce even if there are multiple values
-        # drop other uninformative columns (single values)
-        """
-        for col in set(columns_to_reduce) & set(data.columns):
-            values = list(set(data[col]))
-            temp = ", ".join(values)
-            output.append(f"{col}\t{temp}")
-            if len(values) == 1:
-                columns_to_drop.append(col)
-        """
-        # columns_to_reduce only if there is a single values
-        for col in set(data.columns) - set(columns_to_reduce) - {"read_length_temp"}:
-            values = list(set(data[col]))
-            if len(values) == 1:
-                # output.append(f"{col}\t{values[0]}")
-                columns_to_shift.append(col)
-        if ena_columns := set(
-            "ena_fastq_ftp ena_fastq_ftp_1 ena_fastq_ftp_2".split()
-        ) & set(data.columns):
-            for col in ena_columns:
-                data[col] = data[col].str.replace("era-fasp@fasp.sra.ebi.ac.uk:", "")
-                # mask = data[col].str.startswith("era-fasp@fasp.sra.ebi.ac.uk:")
-                # data.loc[mask, col] = data.apply(lambda x: x[col].split(":")[1], axis=1)
-                # era-fasp@fasp.sra.ebi.ac.uk:vol1/fastq/SRR214/016/SRR21488116/SRR21488116.fastq.gz
-        else:
-            log_message("No ENA fastqs - getting from ENA")
-            ena_data = get_enafastq_list(study_ID=study_ID, delete_temp_output=delete_temp_files)
-            if ena_data is None:
-                log_message("No data from ENA")
-            else:
-                data = pd.merge(
-                    data,
-                    ena_data,
-                    left_on=data.columns[0],
-                    right_on=ena_data.columns[0],
-                    how="left",
-                )
-                for col in ena_data.columns:
-                    if all(x == "" for x in data[col]):
-                        columns_to_drop.append(
-                            col
-                        )  # data.drop(columns = [col], inplace=True)
-
-        if outputfile and os.path.exists(outputfile) and overwrite is False:
-            # necessary to trigger deletion of temp files even if outputfile exists
-            log_message(f"{outputfile} exists - skipping {study_ID}")
-            continue
-
-        data.insert(3, "read_length", 0)
-        data.insert(4, "read_type", "")
-        data["read_length"] = data["read_length_temp"]
-        columns_to_drop.append("read_length_temp")
-        # data.drop(columns = ["read_length_temp",], inplace=True)
-        data.fillna("", inplace=True)
-        if "ena_fastq_ftp_1" in data.columns and "ena_fastq_ftp_2" in data.columns:
-            mask = (data["library_layout"] == "paired") | (
-                (data["ena_fastq_ftp_1"].str.endswith(".gz"))
-                & (data["ena_fastq_ftp_2"].str.endswith(".gz"))
-            )
-        else:
-            mask = data["library_layout"] == "paired"
-        data.loc[mask, "read_length"] = data.loc[mask, "read_length"] / 2
-        data.loc[mask, "read_type"] = "paired"
-        data.loc[~mask, "read_type"] = "single"
-        data["read_length"] = data["read_length"].round(0).astype(int)
-        if "paired" in set(data["read_type"]):
-            data["read_length"] = data["read_length"].astype(str)
-            mask = data["read_type"] == "paired"
-            data.loc[mask, "read_length"] = "2x" + data.loc[mask, "read_length"]
-            """
-            check for paired with solo fastq
-            run_accession	fastq_ftp
-            SRR16106149	ftp.sra.ebi.ac.uk/vol1/fastq/SRR161/049/SRR16106149/SRR16106149.fastq.gz
-            SRR16106152	ftp.sra.ebi.ac.uk/vol1/fastq/SRR161/052/SRR16106152/SRR16106152.fastq.gz
-            SRR16106153	ftp.sra.ebi.ac.uk/vol1/fastq/SRR161/053/SRR16106153/SRR16106153.fastq.gz
-            """
-            if set(["ena_fastq_ftp_1", "ena_fastq_ftp_2"]) - set(
-                data.columns
-            ):
-                log_message("\nWarning: paired reads but single FTP file\n")
-                data["sra_fastq_1"] = ""
-                data["sra_fastq_2"] = ""
-                mask = data["read_type"] == "paired"
-                for i in [1, 2]:
-                    data.loc[mask, f"sra_fastq_{i}"] = (
-                        data["run_accession"] + f"_{i}.fastq"
-                    )
-            else:
-                mask = (data["library_layout"] == "paired") & (
-                    (data["ena_fastq_ftp_1"] == "") | (data["ena_fastq_ftp_2"] == "")
-                )
-                if mask.any():
-                    log_message("\nWarning: paired reads but single FTP file\n")
-                    data["sra_fastq_1"] = ""
-                    data["sra_fastq_2"] = ""
-                    mask = (data["library_layout"] == "paired") & (
-                        (data["ena_fastq_ftp_1"] == "")
-                        | (data["ena_fastq_ftp_2"] == "")
-                    )
-                    for i in [1, 2]:
-                        data.loc[mask, f"sra_fastq_{i}"] = (
-                            data["run_accession"] + f"_{i}.fastq"
-                        )
-        else:
-            data["read_length"] = data["read_length"].astype(int)
-            data["read_length"] = data["read_length"].astype(str)
-        """
-        for col in ["read_type", "read_length"]:
-            values = ", ".join(list(set(data[col])))
-            output.append(f"{col}\t{values}")
-        """
-        if columns_to_drop:
-            data.drop(columns=list(columns_to_drop), inplace=True)
-        # data = pd.DataFrame(data[1:], columns=data[0])
-        if columns_to_shift:
-            columns_to_shift = set(columns_to_shift)
-            noshift = set(data.columns) - columns_to_shift
-            new_order = [x for x in data.columns if x in noshift] + [
-                x for x in data.columns if x in columns_to_shift
-            ]
-            data = data[new_order]  # pd.DataFrame(new_order[1:], columns=new_order[0])
-        data = dedup_cols(data=data)
-        data.to_csv(outputfile if outputfile else sys.stdout, sep="\t", index=False)
-        """
-        #output.append(outputfile else sys.stdout
-        with (open(outputfile, 'w') if outputfile else sys.stdout) as tempout:
-            print("\n".join(output), file=tempout)
-            print("\t".join(data.columns), file=tempout)
-            for i, row in data.iterrows():
-                print("\t".join(map(str,row)), file=tempout)
-        """
-        if outputfile:
-            log_message(f"{outputfile} created for {study_ID}")
-
-
-def species(args):
+def bam_species(args):
     if args.OUTPUTFILE:
         exit_if_files_exist(args.OUTPUTFILE)
     verify_that_paths_exist(args.BAMFILES)
@@ -1225,46 +992,14 @@ def species(args):
         for bam in args.BAMFILES:
             print(f"{bam}\t{species[bam]}", file=tempout)
 
+def bash_header(*, flags: str = "set -e"):
+    return dedent(f"""
+        #!/bin/bash
+        {flags}
+        log() {{ echo "$*" >&2 ; }}
+        die() {{ echo "$*" >&2; exit 1 ; }}
+    """).lstrip()
 
-def get_single_species_for_bamfiles(bamfiles=None):  # , check_if_bamfiles_exist=True):
-    # bamfiles = list of bam files
-    # reports error and stops if there's more than one species for a list of BAM files
-    # otherwise returns species as a string
-    assert isinstance(bamfiles, list), "bamfiles is not a list"
-    # if check_if_bamfiles_exist:
-    verify_that_paths_exist(bamfiles)
-    # species_for_bams = list(set([execute_command(f"{get_species_for_bam_sh} {bam}", exit_on_error=True) for bam in bamfiles]))
-    species_for_bams = list(set(get_species_for_bamfiles(bamfiles=bamfiles).values()))
-    if len(species_for_bams) == 1:
-        return species_for_bams[0]
-    else:
-        temp = " ".join(species_for_bams)
-        log_message(f"Invalid number of species for bam files: {temp}", exit_now=True)
-
-
-def get_single_read_type_for_bamfiles(
-    bamfiles=None,
-):  # , check_if_bamfiles_exist=True):
-    # bamfiles = list of bam files
-    # reports error and stops if there's more than one read type
-    # otherwise returns read type (paired or single) as a string
-    assert isinstance(bamfiles, list), "bamfiles is not a list"
-    # if check_if_bamfiles_exist:
-    verify_that_paths_exist(bamfiles)
-    # read_types = list(set([execute_command(f"{determine_read_type_sh} {bam}", exit_on_error=True) for bam in bamfiles]))
-    read_types = list(
-        set(
-            [
-                get_read_type_for_bamfile(bamfile=bam, check_if_bamfile_exists=False)
-                for bam in bamfiles
-            ]
-        )
-    )
-    if len(read_types) == 1:
-        return read_types[0]
-    else:
-        temp = " ".join(read_types)
-        log_message(f"Multiple read types: {temp}", exit_now=True)
 
 def get_genecoords(args):
     #if args.SCRIPT and args.OUTPUTFILE:
@@ -1356,7 +1091,7 @@ To get all non-supplementary/secondary reads in a single file, redirect the outp
    samtools fastq in.bam > all_reads.fq
 """
 
-
+r'''
 def rnaspades(args):
 
     # construct commands to:
@@ -1404,15 +1139,16 @@ def rnaspades(args):
                 )
 
     outputdir_by_sample = {
-        x: check_dir(os.path.realpath(re.sub(r"\.bam$", "", x))) for x in bamfiles
+        x: os.path.realpath(re.sub(r"\.bam$", "", x)) for x in bamfiles
     }
+    for d in outputdir_by_sample.values(): check_dir_write_access(d)
 
-    read_type = {x: get_read_type_for_bamfile(bamfile=x) for x in bamfiles}
+    read_type = {x: get_read_type_from_a_bamfile(bamfile=x) for x in bamfiles}
     fastq_files = {}
     fastq_file = {}
     for bam in bamfiles:
         prefix = re.sub(r"\.bam$", "", bam)
-        if read_type[bam] == "paired":
+        if read_type[bam] == constants.read_type.paired:
             fastq_files[bam] = [f"{prefix}_1.fq", f"{prefix}_2.fq"]
             exit_if_files_exist(fastq_files[bam])
         else:
@@ -1440,7 +1176,7 @@ def rnaspades(args):
         output.append(f"\n# {bam}")
         outputdir = outputdir_by_sample[bam]
         log = f"{outputdir}.log"
-        if read_type[bam] == "paired":
+        if read_type[bam] == constants.read_type.paired:
             # library consists of paired reads - extract reads not aligned by STAR as proper pairs
             fq1, fq2 = fastq_files[bam]
             temp1 = f"{genebam[bam]}.temp.1"
@@ -1572,10 +1308,10 @@ def rnaspades(args):
         single_line_command=cmd,
         execute =args.EXEC,
     )
-
+'''
 
 def handle_commands_and_output(*,
-    commands: str | list[str], outputfile: FileName|None = None, single_line_command: str|None =  None, execute: bool = False
+    commands: str | list[str], outputfile: File_or_Dir|None = None, single_line_command: str|None =  None, execute: bool = False
 ):
     # commands = list of strings
     # single_line_command = individual command to execute script, only valid if outputfile is specified
@@ -1610,18 +1346,6 @@ def handle_commands_and_output(*,
         else:
             print("\n".join(commands))
 
-
-def make_gene_bam(*, inputbam: FileName, outputbam: FileName, regions: FileName, execute: bool = False):
-    verify_that_paths_exist([inputbam, regions])
-    exit_if_files_exist(outputbam)
-    command = f"samtools view -o {outputbam} --region {regions} {inputbam} && samtools index {outputbam}"
-    if execute:
-        execute_command(command=command, log_command=True, exit_on_error=True)
-        for x in [outputbam, f"{outputbam}.bai"]:
-            if not os.path.exists(x):
-                log_message(f"Status OK but {x} not found", exit_now=True)
-    else:
-        return command
 
 
 def genebams(args):
@@ -1672,6 +1396,8 @@ def genebams(args):
 
 
 def junctions(args):
+    pass
+    r'''
     from tempfile import mkstemp
 
     # needs coords and either gene bams or non-gene BAMs, but not both
@@ -1679,8 +1405,6 @@ def junctions(args):
     outputfileext = args.EXT
     bamfiles = args.BAMFILES
     verify_that_paths_exist(bamfiles)
-    #species = args.SPECIES or get_single_species_for_bamfiles(bamfiles=bamfiles)
-    #cpus = args.CPUS
     outputfile = {bamfile: f"{bamfile}.{outputfileext}" for bamfile in bamfiles}
     # outputfileprefix = {x: re.sub('\.bam$', f".realigned", x) for x in genebamfiles}
     exit_if_files_exist(outputfile.values())
@@ -1717,13 +1441,13 @@ def junctions(args):
         data["name"] = [f"JUNC{n+1:08d}" for n in range(data.shape[0])]
         data.drop(columns=["_score"]).to_csv(outputfile[bamfile], sep="\t", index=False)
     os.remove(tempoutputfile)
-
+    '''
 
 """
-		-a INT	Minimum anchor length. Junctions which satisfy a minimum anchor length on both sides are reported. [8]
-		-m INT	Minimum intron length. [70]
-		-M INT	Maximum intron length. [500000]
-		-o FILE	The file to write output to. [STDOUT]
+-a INT	Minimum anchor length. Junctions which satisfy a minimum anchor length on both sides are reported. [8]
+-m INT	Minimum intron length. [70]
+-M INT	Maximum intron length. [500000]
+-o FILE	The file to write output to. [STDOUT]
 """
 
 
@@ -1768,9 +1492,9 @@ def abra2(args):
     species = args.SPECIES or get_single_species_for_bamfiles(bamfiles=genebamfiles)
     read_type = args.READS or get_single_read_type_for_bamfiles(bamfiles=genebamfiles)
     command = f"abra2 --nosort --threads {cpus} --undup"
-    if read_type == "single":
+    if read_type == constants.read_type.single:
         command += " --single"
-    elif read_type != "paired":
+    elif read_type != constants.read_type.paired:
         log_message(f"Invalid read type {read_type}", exit_now=True)
     regiondata = pd.read_csv(regions_file, sep="\t", header=None, dtype=object)
     chr_column = regiondata.columns[0]
@@ -1787,7 +1511,7 @@ def abra2(args):
             if os.path.exists(ref_file):
                 pass
             elif os.path.exists(f"{ref_file}.gz"):
-                output.append(f"gunzip -q {ref_file}.gz")
+                output.append(f"gunzip --keep -q {ref_file}.gz")
             else:
                 files_not_found.append(ref_file)
     if errors := "\n".join(files_not_found):
@@ -1890,7 +1614,11 @@ def find_gtf(species=None):
     if os.path.exists(gtf):
         return gtf
     if os.path.exists(f"{gtf}.gz"):
-        log_message(f"zcat {gtf}.gz > {gtf}\nor\ngunzip {gtf}", exit_now=True)
+        log_message(f"""
+            zcat {gtf}.gz > {gtf}
+               or
+            gunzip {gtf}
+        """, exit_now=True)
     log_message(f"{gtf} not found for {species}", exit_now=True)
 
 
@@ -1949,7 +1677,7 @@ def featureCounts(args):
             # this would fail since opts is unspecified
             output.append(f"featureCounts -a {gtf} -o {out} {opts} {bam} 2>> {out}.log")
     with open(outputscript, "w") if outputscript else sys.stdout as tempout:
-        print("\n".join(output), file=tempout)
+        print(*output, sep="\n", file=tempout)
 
     cmd = f"nohup {outputscript} &>> {outputscript}.log &" if outputscript else ""
     handle_commands_and_output(
@@ -2031,25 +1759,6 @@ def gene_metadata(args):
     else:
         return data
 
-
-def find_star_index(index=None):
-    # takes basename of index, looks in indexstores
-    index = os.path.basename(index)
-    species = index.split(".")[0]
-    if not species in constants.known_species:
-        log_message(f"Unknown species {species}", exit_now=True)
-    for dir in constants.index_stores:
-        indexpath = os.path.join(dir, index)
-        if os.path.exists(indexpath):
-            if dir != constants.star.base_dir:
-                log_message(
-                    f"nice cp -r {indexpath} {constants.star.base_dir} &"
-                )  # , exit_now=True)
-            return indexpath, species
-    temp = "\n".join(constants.index_stores)
-    log_message(f"{index} not found in:\n{temp}", exit_now=True)
-
-
 def genomeref(args):
     if args.SCRIPT:
         if "{species}" in args.SCRIPT:
@@ -2069,57 +1778,11 @@ def genomeref(args):
     """))
     if args.SCRIPT:
         with open(args.SCRIPT, "w") as tempout:
-            print("\n".join(output), file=tempout)
+            print(*output, sep="\n", file=tempout)
         os.chmod(args.SCRIPT, 0o755)
         log_message(f"created {args.SCRIPT}")
     else:
-        print("\n".join(output))
-
-# STAR
-
-def star_list_idx(args):
-    print("\n".join(find_star_indexes().keys()))
-
-def find_star_indexes():
-    # return an orderedDict with index as key and dir as value
-    index_path = OrderedDict()
-    for dir in constants.index_stores:
-        for index in map(
-            os.path.basename, map(os.path.dirname, glob.glob(f"{dir}/*/SAindex"))
-        ):
-            if not index in index_path.keys():
-                index_path[index] = dir
-                if not index.split(".")[0] in constants.known_species:
-                    log_message(
-                        f"Caution: {dir}/{index} is not in constants.known_species"
-                    )
-        return index_path
-
-
-def check_dir(dir=None):
-    # if dir exists, checks for write access
-    # otherwise, tries to create it
-    # returns dir or fails
-    assert isinstance(dir, str), "dir is not a string"
-    dir = dir.rstrip("/")
-    if os.path.exists(dir):
-        if os.access(dir, os.W_OK):
-            log_message(f"{dir} exists, write access OK")
-            return dir
-        log_message(f"No write access to {dir}")
-    else:
-        try:
-            os.makedirs(dir)
-            log_message(f"{dir} created")
-            return dir
-        except:
-            log_message(f"Cannot create {dir}")
-    for line in execute_command("mount"):
-        temp = line.split(" ")
-        if len(temp) > 1 and temp[1] == "on" and dir.startswith(temp[2]):
-            log_message(f"{temp[2]} is mounted", exit_now=True)
-    log_message(f"{dir} is not on a mounted drive", exit_now=True)
-
+        print(*output, sep="\n")
 
 """
 input if source is aspera (tabs only, header optional and arbitrary)
@@ -2171,7 +1834,7 @@ def bash_samtools_sort_by_position(sortcpus=None, sortmem=None):
     return bash_function_name, code
 
 
-def bash_featurecounts(*, gtf: FileName, cpus: int, options: str):
+def bash_featurecounts(*, gtf: File_or_Dir, cpus: int, options: str):
     opts = f"{options} -T {cpus}"
     bash_function_name = "run_featurecounts"
     code = f"""
@@ -2201,9 +1864,9 @@ def bash_aspera(speed=0):
     return bash_function_name, code
 
 
-def bash_fasterq(*, cpus: int, read_type: define_constants().read_types):
+def bash_fasterq(*, cpus: int, read_type: constants.read_types):
     bash_function_name = "fastqs_sra"
-    opts = {"single": "", "paired": "--split-files"}.get(read_type)
+    opts = {constants.read_type.single: "", constants.read_type.paired: "--split-files"}.get(read_type)
     code = f"""
         {bash_function_name}(){{
             opts="{opts} --threads {cpus} --bufsize 500MB --curcache 500MB --mem 2500MB"
@@ -2229,7 +1892,7 @@ def bash_star(*, cpus: int = 1, index=None, readFilesCommand: ["cat", "zcat"]):
             otheropts=$3
             out=$prefix.star.out
             err=$prefix.star.err
-            sampleopts="--outFileNamePrefix $prefix."
+            sampleopts="--outFile_or_DirPrefix $prefix."
             inputopts="--readFilesCommand {readFilesCommand}"
             index={index}
             outputopts="--outSAMunmapped Within --outBAMcompression 8 --outSAMprimaryFlag AllBestScore --outFilterMultimapScoreRange 0 --outSAMtype BAM Unsorted --runDirPerm All_RWX"
@@ -2263,9 +1926,8 @@ def parse_fastq_manifest(
     else:
         header = 0
         for i, row in data[0:1].iterrows():
-            temp = "\t".join(row)
-            log_message(f"Header row found in {inputfile}:\n{temp}")
-    data = pd.read_csv(inputfile, sep="\t", header=_header, dtype=object)
+            log_message(f"Header row found in {inputfile}:", *temp, sep="\n\t")
+    data = pd.read_csv(inputfile, sep="\t", header=header, dtype=object)
     errors = False
     label = data.columns[0]
     label = data.columns[0]
@@ -2283,9 +1945,9 @@ def parse_fastq_manifest(
         errors = True
     fastq_columns = list(data.columns[1:])
     if len(fastq_columns) == 1:
-        read_type = "single"
+        read_type = constants.read_type.single
     elif len(fastq_columns) == 2:
-        read_type = "paired"
+        read_type = constants.read_type.paired
     else:
         log_message("Invalid number of columns", exit_now=True)
     log_message(f"{read_type} reads")
@@ -2303,7 +1965,7 @@ def parse_fastq_manifest(
             temp = "\n".join(problematic)
             log_message(f"fastq files not matching ^vol1/.+fastq.gz$:\n{temp}")
             errors = True
-        if read_type == "single":
+        if read_type == constants.read_type.single:
             if problematic := [
                 x for x in data[fastq_columns[0]] if re.search(r"_1.fastq|_2.fastq", x)
             ]:
@@ -2324,7 +1986,7 @@ def parse_fastq_manifest(
                 log_message(f"invalid 2 fastq files for {read_type} reads:\n{temp}")
                 errors = True
     elif fastq_source == "SRA":
-        if read_type == "single":
+        if read_type == constants.read_type.single:
             if problematic := [
                 x for x in data[fastq_columns[0]] if not re.match(r"^SRR\d+.fastq$", x)
             ]:
@@ -2384,7 +2046,7 @@ def parse_fastq_manifest(
         star_fastq_files[sample] = star_fastq_files[sample].rstrip()
     return samples, fastq_fetch_params, star_fastq_files, read_type
 
-def check_if_ref_files_match(*, dna: FileName, rna: FileName, species: define_constants().known_species):
+def check_if_ref_files_match(*, dna: File_or_Dir, rna: File_or_Dir, species: constants.known_species):
 
     """
     Input = paired URLs
@@ -2443,6 +2105,7 @@ def star_make_idx(args):
     index = index.replace("{dna_build}", dna_build)
     index = index.replace("{rna_build}", rna_build)
 
+
     cpus = args.CPUS or "$(grep -c ^processor /proc/cpuinfo)"
     if args.MEM == 0:
         mem=""
@@ -2479,6 +2142,9 @@ def star_make_idx(args):
     else:
         print("\n".join(output))
 
+    
+
+
 def star(args):
     # output commands to fetch fastqs and run STAR and featureCounts
     test_executables(["samtools", "STAR"], exit_on_error=True)
@@ -2494,26 +2160,30 @@ def star(args):
     if args.ABRA2COORDS:
         verify_that_paths_exist(args.ABRA2COORDS)
         test_executables("abra2", exit_on_error=True)
+    """
     if args.RNASPADESCOORDS:
         verify_that_paths_exist(args.RNASPADESCOORDS)
         test_executables(rnaspades.exe)
-
-    outputdir = check_dir(dir=args.OUTPUTDIR)
-    counts_dir = check_dir(dir=os.path.join(outputdir, "counts"))
+    """
+    outputdir = args.OUTPUTDIR
+    counts_dir = os.path.join(outputdir, "counts")
+    check_dir_write_access([outputdir, counts_dir])
     if glob.glob(f"{counts_dir}/*"):
         log_message(f"\nCaution: files found in {counts_dir}\n", exit_now=True)
-    if args.BAMDESTDIR:
-        bamdestdir = check_dir(dir=args.BAMDESTDIR)
-    else:
-        bamdestdir = ""
+    bamdestdir = args.BAMDESTDIR or ""
+    if bamdestdir:
+        check_dir_write_access(bamdestdir)
     if args.ABRA2COORDS:
-        abra2dir = check_dir(dir=os.path.join(outputdir, "abra2"))
+        abra2dir = os.path.join(outputdir, "abra2")
+        check_dir_write_access(abra2dir)
+    """
     if args.RNASPADESCOORDS:
-        rnaspadesdir = check_dir(dir=os.path.join(outputdir, "rnaspades"))
+        rnaspadesdir = os.path.join(outputdir, "rnaspades")
+        check_dir_write_access(rnaspadesdir)
         # rnaspadesdir = os.path.join(outputdir, "rnaspades")
         # temp = os.path.basename(os.path.realpath(outputdir))
-        # rnaspadesdir = check_dir(dir = os.path.join(rnaspadesdir, temp))
-
+        # rnaspadesdir = check_dir_write_access(dir = os.path.join(rnaspadesdir, temp))
+    """
     outputscript = args.SCRIPT  # os.path.join(outputdir, )
     overwrite = args.OVERWRITE
     if outputscript and not overwrite:
@@ -2665,7 +2335,7 @@ def star(args):
         {__file__} star_clear_mem --index {indexpath}
     """))
 
-    if bamdestdir and (args.ABRA2COORDS or args.RNASPADESCOORDS):
+    if bamdestdir and args.ABRA2COORDS: # or args.RNASPADESCOORDS):
         output.append(dedent(f"""
             log waiting for mvjobid=$mvjobid
             wait $mvjobid
@@ -2682,7 +2352,7 @@ def star(args):
             f"{__file__} abra2 -b *.bam -r {os.path.basename(args.ABRA2COORDS)} -z --exec"
         )
         output.append(f"cd {os.path.realpath(outputdir)}")
-
+    """
     if args.RNASPADESCOORDS:
         srcdir = bamdestdir or os.path.realpath(outputdir)
         output.append(f"cp -s {srcdir}/*.bam {srcdir}/*.bai {rnaspadesdir}")
@@ -2692,7 +2362,7 @@ def star(args):
             f"{__file__} rnaspades -b *.bam -r {os.path.basename(args.RNASPADESCOORDS)} -z --exec"
         )
         output.append(f"cd {os.path.realpath(outputdir)}")
-
+    """
     cmd = f"nohup {outputscript} &>> {outputscript}.log &" if outputscript else ""
     handle_commands_and_output(
         commands=output, outputfile=outputscript, single_line_command=cmd, execute =False
@@ -2803,7 +2473,6 @@ def add_gene_name(args):
     temp = outputfile or "stdout"
     log_message(f"counts by gene name written to {temp}")
 
-
 def merge_counts(args):
     log_message("merge counts")
     files = args.INPUTFILES
@@ -2849,9 +2518,34 @@ def merge_counts(args):
     log_message(f"Total counts written to {totals}")
 
 
-def exp(args):
-    log_message("transform counts")
-    inputfile = args.INPUTFILE
+def rank_values(args):
+    verify_that_paths_exist(args.INPUTFILE)
+    if args.OUTPUTFILE and not args.OVERWRITE:
+        exit_if_files_exist(args.OUTPUTFILE)
+
+    temp = pd.read_csv(args.INPUTFILE, sep="\t", header=0, comment="#", nrows=1)
+    if args.COLUMN:
+        verify_columns_present_in_dataframe(
+            data=temp, columns=args.COLUMN, source=args.INPUTFILE
+        )
+        if not args.NEWCOLUMN:
+            newcolumn = f"rank_by_{args.COLUMN}"
+    else:
+        if args.SORT:
+            log_message("There is no sense in sorting by the rank", exit_now=True)
+        newcolumn = args.NEWCOLUMN or "order"
+    verify_columns_absent_in_dataframe(
+            data=temp,  columns=newcolumn, source=args.INPUTFILE
+        )
+    data = pd.read_csv(args.INPUTFILE, sep="\t", header=0, comment="#")
+
+    if args.COLUMN:
+        if args.SORT:
+            data.sort_values(by=args.COLUMN, ascending = args.ORDER == "ascending", inplace=True)
+        data[newcolumn] = data[args.COLUMN].rank(method="min").astype(int)
+    else:
+        data[newcolumn] = list(range(1, data.shape[0]+1))
+    data.to_csv(args.OUTPUTFILE if args.OUTPUTFILE else sys.stdout, sep="\t", index=False)
 
 
 def transformcounts(args):
@@ -3063,7 +2757,7 @@ def star_clear_mem(args):
     verify_that_paths_exist(constants.star.dummy_fastq)
     output = [bash_header()]
     output.append(dedent(f"""
-        STAR --genomeDir {args.INDEX} --readFilesIn {constants.star.dummy_fastq} --runThreadN 4 --outFileNamePrefix ${constants.star.dummy_fastq}. --genomeLoad Remove --runMode alignReads"
+        STAR --genomeDir {args.INDEX} --readFilesIn {constants.star.dummy_fastq} --runThreadN 4 --outFile_or_DirPrefix ${constants.star.dummy_fastq}. --genomeLoad Remove --runMode alignReads"
     """))
     # --outSAMtype BAM Unsorted --outSAMprimaryFlag AllBestScore --outFilterMultimapScoreRange 0 --outFilterMultimapNmax 25 --seedMultimapNmax 250 --seedPerReadNmax 250 --alignTranscriptsPerReadNmax 1000 --limitOutSJoneRead 100 --alignWindowsPerReadNmax 250 
     output = output.dedent()
@@ -3073,16 +2767,6 @@ def star_clear_mem(args):
         os.chmod(outputscript, 0o755)
         log_message(f"created {outputscript}")
         #print(outputscript)
-
-def check_for_file_xor_stdin(inputfile: FileName | None):
-    if inputfile is None:
-        if detect_stdin():
-            return
-        log_message("Specify an input file or stdin.", exit_now=True)
-    elif detect_stdin():
-        log_message("Specify an input file or stdin, but not both.", exit_now=True)
-        verify_that_paths_exist(args.INPUTFILE)
-
 
 def text_to_fasta(args):
     # inputs tab-delimited text, outputs fasta
@@ -3159,7 +2843,7 @@ def bash_check_transfer_speed(file_name="aspera.speed"):
 '''
 
 
-def dedup_cols(data):
+def dedup_cols(data: pd.DataFrame):
     assert isinstance(data, pd.DataFrame), "data is not a dataframe"
     column_contents = {x: "\n".join(map(str, data[x])) for x in data.columns}
     skip = {x: 0 for x in data.columns}
@@ -3229,8 +2913,6 @@ def join_files(args):
         )
     for i, inputfile in enumerate(args.INPUTFILES):
         data = pd.read_csv(inputfile, sep="\t", header=0, dtype=object)
-        # data[i].to_csv(f"out.{i}", sep="\t", index=False)
-        # print(f"{i}:\n" + "\n".join(data[i].columns))
         verify_columns_present_in_dataframe(
             data=data, columns=columns[i], source=inputfile
         )
@@ -3282,8 +2964,8 @@ def join(args):
     output.to_csv(outputfile if outputfile else sys.stdout, sep="\t", index=False)
 """
 
-
-def minimap_output_file(inputfile: FileName):  # =None, ext=None):
+r'''
+def minimap_output_file(inputfile: File_or_Dir):  # =None, ext=None):
     outputfile = re.sub(r"\.gz$", "", inputfile)
     outputfile = re.sub(".fasta", "", outputfile)
     # outputfile = re.sub(r"\.fa$", "", outputfile)
@@ -3292,7 +2974,7 @@ def minimap_output_file(inputfile: FileName):  # =None, ext=None):
     return outputfile
 
 
-def bash_minimap(*, cpus: int, bases_loaded: str, genome: str, junctions: FileName):
+def bash_minimap(*, cpus: int, bases_loaded: str, genome: str, junctions: File_or_Dir):
     # assert bases_loaded is not None, "Specify bases_loaded"
     # assert cpus is not None, "Specify cpus"
     # -2 Use two I/O threads during mapping.
@@ -3392,1207 +3074,7 @@ def minimap(args):
     )
 
     # bam2Bed12.py -i transcripts.fasta.v4.bam > transcripts.fasta.v4.bed2.txt
-
-def define_args():
-
-    args = ArgDef(
-        desc="Functions for RNA-seq data.", subfunctions=True, allow_unknown_args=False
-    )
-
-    # geo
-    fn = "geo"
-    help_text ="Get metadata from GEO"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--ids", "-i", type=str, required=True, help="Identifier(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--ext",
-        "-O",
-        type=str,
-        required=False,
-        help="Output file suffix",
-        default="_geo.txt",
-    )
-
-    # metadata
-    fn = "pysradb"
-    help_text ="Get metadata with pysradb"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--ids", "-i", type=str, required=True, help="Identifier(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--keeptempfiles",
-        "-k",
-        required=False,
-        help="Keep temp output files.",
-        default=False,
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file for single ID. Default is {ID}.{ext}",
-    )
-    subparser.add_argument(
-        "--ext",
-        "-e",
-        type=str,
-        required=False,
-        help="Output file suffix",
-        default="_pysradb.txt",
-    )
-    subparser.add_argument(
-        "--overwrite",
-        "-w",
-        required=False,
-        help="Overwrite files if present.",
-        action="store_true",
-    )
-    # subparser.add_argument("--source", "-m", type=str, required=False, help="Source of metadata.", default="SRA", choices=["ENA", "SRA", "GEO"])
-
-    # dedup_cols
-    fn = "dedup_cols"
-    help_text ="Remove duplicate columns"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfile", "-i", type=str, required=False, help="Input file."
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file. Stdout if omitted.",
-    )
-
-    # enafastqs
-    fn = "enafastqs"
-    help_text ="Get la ist of ENA fastqs for ID(s) like PRJNA627881"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--ids", "-i", type=str, required=True, help="Identifier(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--keeptempfiles",
-        "-k",
-        required=False,
-        help="Keep temp output files.",
-        default=False,
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--ext",
-        "-O",
-        type=str,
-        required=False,
-        help="Output file extension",
-        default="ena.txt",
-    )
-
-    # genecoords
-    fn = "get_genecoords"
-    help_text ="Get coordinates for a list of genes, in BED format, or output the script to do this."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--genes",
-        "-g",
-        type=str,
-        required=True,
-        help="Gene(s) in a file or as a space-separated list",
-        nargs="+",
-    )
-    subparser.add_argument(
-        "--species",
-        "-s",
-        type=str,
-        required=True,
-        help="On the origin of reads.",
-        choices=constants.known_species,
-    )
-    subparser.add_argument(
-        "--extend",
-        "-x",
-        type=int,
-        required=False,
-        help="Extension of gene boundaries, in nucleotides. Maximum not checked against chromosome length.",
-        default=0,
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file for gene coordinates. Stdout if omitted.",
-        default = "gene_coords_{species}_ext_{extend}.bed"
-    )
-    subparser.add_argument(
-        "--overwrite",
-        "-w",
-        required=False,
-        help="Overwrite files if present.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--script", "-S", type=str, required=False, #default=f"{fn}.sh",
-        help='Output command to this Bash script instead of executing.'
-    )
-
-    # gene_metadata
-    fn = "gene_metadata"
-    help_text ="Extract metadata columns from featureCounts output files."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfile", "-i", type=str, required=True, help="Input file."
-    )
-    subparser.add_argument(
-        "--outputdir",
-        "-O",
-        type=str,
-        required=False,
-        help="Output directory.",
-        default=".",
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file for gene metadata.",
-        default=constants.default_gene_metadata,
-    )
-
-    # pre-STAR
-
-    fn = "genomeref"
-    help_text ="Generate script to fetch genome (fasta) and transcriptome (gtf) files."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--species",
-        "-s",
-        type=str,
-        required=True,
-        help="On the origin of reads.",
-        choices=constants.known_species,
-    )
-    subparser.add_argument(
-        "--outputdir",
-        "-O",
-        type=str,
-        required=False,
-        help="Output directory.",
-        default=constants.ref_dir
-    )
-    subparser.add_argument(
-        "--overwrite",
-        "-w",
-        required=False,
-        help="Overwrite files if present.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--script",
-        "-S",
-        type=str,
-        required=False,
-        default=f"{fn}_{{species}}.sh",
-        help='Output commands to bash script. Set to "" for stdout.',
-    )
-
-    fn = "gtf_to_coords"
-    help_text ="Extract gene coordinates from GTF."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfile", "-i", type=str, required=False, help="Input file. Required unless --species is specified."
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file.  Required unless --species is specified.",
-    )
-    subparser.add_argument(
-        "--species",
-        "-s",
-        type=str,
-        required=False,
-        help="On the origin of reads. Assumes default input & output files.",
-        choices=constants.known_species,
-    )
-    subparser.add_argument(
-        "--overwrite",
-        "-w",
-        required=False,
-        help="Overwrite files if present.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--sort",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Sort by chr, start & stop. Use --no_sort to skip.",
-    )
-    subparser.add_argument(
-        "--genes", "-g", type=str, required=False, help="Gene type(s) to keep, space-separated. Use \"\" for all.", default=["protein_coding"], nargs="+"
-    )
-
-    fn = "ens_to_gene"
-    help_text ="Extract unique gene-name/gene-ID pairs from GTF."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfile", "-i", type=str, required=False, help="Input file. Required unless --species is specified."
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file.  Required unless --species is specified.",
-    )
-    subparser.add_argument(
-        "--species",
-        "-s",
-        type=str,
-        required=False,
-        help="On the origin of reads. Assumes default input & output files.",
-        choices=constants.known_species,
-    )
-    subparser.add_argument(
-        "--overwrite",
-        "-w",
-        required=False,
-        help="Overwrite files if present.",
-        action="store_true",
-    )
-
-
-    # STAR alignments etc.
-
-    fn = "star"
-    help_text ="Output commands to fetch fastqs then run STAR & featureCounts. Input=label tab fastq1 (tab fastq2)"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--index",
-        "-x",
-        type=str,
-        required=True,
-        help="Genome index. Path is ignored.",
-        choices=list(find_star_indexes().keys()),
-    )
-    subparser.add_argument(
-        "--inputfile", "-i", type=str, required=True, help="Input file."
-    )
-    subparser.add_argument(
-        "--abra2",
-        type=str,
-        required=False,
-        help="Coords file to use for gene bams then abra2.",
-    )
-    subparser.add_argument(
-        "--additional",
-        "-a",
-        type=str,
-        required=False,
-        help="Additional options, in double quotes, added verbatim.",
-        default="",
-    )
-    subparser.add_argument(
-        "--addreadgroup",
-        required=False,
-        help="Use sample ID as read group.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--bamdest",
-        "-D",
-        type=str,
-        required=False,
-        help="Destination for BAM files after completion, e.g. on mounted drive",
-    )
-    subparser.add_argument(
-        "--counts",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Run featurecounts after alignments. Use --no_counts to skip.",
-    )
-    subparser.add_argument(
-        "--cpus", "-c", type=int, required=False, default=constants.cpus, help="CPUs."
-    )
-    subparser.add_argument(
-        "--exec",
-        "-X",
-        required=False,
-        help="Execute command(s) instead of output.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--fastqsource",
-        "-f",
-        type=str,
-        required=False,
-        help="Source of fastq files.",
-        default="ENA",
-        choices=["ENA", "SRA"],
-    )
-    subparser.add_argument(
-        "--outputdir",
-        "-O",
-        type=str,
-        required=False,
-        help="Output directory.",
-        default=".",
-    )
-    subparser.add_argument(
-        "--overwrite",
-        "-w",
-        required=False,
-        help="Overwrite files if present.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        f"--readtype",
-        "-r",
-        type=str,
-        required=False,
-        help="Read pairing",
-        choices=constants.read_types,
-    )
-    subparser.add_argument(
-        "--rnaspades",
-        type=str,
-        required=False,
-        help="Coords file to use for gene bams then rnaspades.",
-    )
-    subparser.add_argument(
-        "--sortcpus", "-C", type=int, required=False, default=int(constants.cpus / 2),
-        help="CPUs to use for sorting"
-    )
-    subparser.add_argument("--sortmem", "-M", type=int, required=False, default=2000, help="Memory to use for sorting")
-    subparser.add_argument(
-        "--transferspeed",
-        "-t",
-        type=int,
-        required=False,
-        help="Aspera transfer speed.",
-        default=500,
-    )
-    subparser.add_argument(
-        "--script",
-        "-S",
-        type=str,
-        required=False,
-        default=f"{fn}.sh",
-        help='Output commands to bash script. Set to "" for stdout.',
-    )
-
-    fn = "star_clear_mem"
-    help_text ="Output command to remove star genome from mem"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--index", "-x", type=str, required=True, help="Genome index. Path is ignored."
-    )
-    subparser.add_argument(
-        "--script",
-        "-S",
-        type=str,
-        required=False,
-        default=f"{fn}.sh",
-        help='Output commands to bash script. Set to "" for stdout.',
-    )
-
-    fn = "star_make_idx"
-    help_text ="Output command to make an index for a given species and read length."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--species",
-        "-s",
-        type=str,
-        required=True,
-        help="On the origin of reads.",
-        choices=constants.known_species,
-    )
-    subparser.add_argument(
-        "--readlength",
-        "-r",
-        type=int,
-        required=True,
-        help="Read length minus 1, probably 49, 75, 100 or  150. See Star Manual"
-    )
-    subparser.add_argument(
-        "--index",
-        "-i",
-        type=str,
-        required=False,
-        help="Name of index, i.e., base output directory.",
-        default=os.path.join(constants.star.base_dir, "{species}.{dna_build}_{rna_build}.{readlength}")
-    )
-    subparser.add_argument(
-        "--cpus", "-c", type=int, required=False, default=constants.cpus, help="CPUs. Set to 0 for all cpus."
-    )
-    subparser.add_argument(
-        "--overwrite",
-        "-w",
-        required=False,
-        help="Overwrite files if present.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--script",
-        "-S",
-        type=str,
-        required=False,
-        default=f"{fn}_{{species}}_{{readlength}}.sh",
-        help='Output Bash script. Set to "" for stdout.',
-    )
-    subparser.add_argument(
-        "--mem",
-        "-m",
-        type=int,
-        required=False,
-        help="Memory in Gb. Set to 0 to exclude this parameter.",
-        default=constants.star.indexmem,
-    )
-
-    # star_zip_files
-    fn = "star_zip_files"
-    help_text ="Output commands to zip star logs, outputs and fastq file lists"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--dir",
-        "-d",
-        type=str,
-        required=False,
-        help="Location of input & output files",
-        default=".",
-    )
-    subparser.add_argument(
-        "--exec",
-        "-X",
-        required=False,
-        help="Execute command(s) instead of output.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--script",
-        "-S",
-        type=str,
-        required=False,
-        default="unsort.sh",
-        help='Output commands to Bash script. Set to "" for stdout.',
-    )
-
-    # star_list_idx
-    fn = "star_list_idx"
-    help_text ="Output list of STAR indexes found in index store(s)."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-
-    # expression counts
-
-    # featureCounts
-    fn = "featureCounts"
-    help_text ="Run featureCounts, by default after sorting by read ID."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--bams", "-b", type=str, required=True, help="Input BAM file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--cpus", "-c", type=int, required=False, default=constants.cpus, help="CPUS."
-    )
-    subparser.add_argument(
-        "--exec",
-        "-X",
-        required=False,
-        help="Execute command(s) instead of output.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--script",
-        "-S",
-        type=str,
-        required=False,
-        default=f"{fn}.sh",
-        help='Output commands to bash script. Set to "" for stdout.',
-    )
-    subparser.add_argument(
-        "--sortbyreadid",
-        "-r",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Sort by read ID before running featureCounts. Use --no_sortbyreadid to skip.",
-    )
-    subparser.add_argument(
-        "--sortcpus", "-C", type=int, required=False, default=int(constants.cpus / 2),
-        help= "CPUs to use for sorting."
-    )
-    subparser.add_argument(
-        "--sortmem", "-M", type=int, required=False, default=constants.sortmem,
-        help = "Memory to use for sorting"
-    )
-    subparser.add_argument(
-        "--species",
-        "-s",
-        type=str,
-        required=False,
-        help="On the origin of reads.",
-        choices=constants.known_species,
-    )
-
-    # counts_postproc
-    fn = "counts_postproc"
-    help_text ="Post-process featureCounts files."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--species",
-        "-s",
-        type=str,
-        required=True,
-        help="On the origin of reads.",
-        choices=constants.known_species,
-    )
-    subparser.add_argument(
-        "--dir",
-        "-d",
-        type=str,
-        required=False,
-        help="Location of input & output files",
-        default=".",
-    )
-    subparser.add_argument(
-        "--exec",
-        "-X",
-        required=False,
-        help="Execute command(s) instead of output.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--script",
-        "-S",
-        type=str,
-        required=False,
-        default=f"{fn}.sh",
-        help='Output commands to bash script. Set to "" for stdout.',
-    )
-
-    # merge_counts
-    fn = "merge_counts"
-    help_text ="Combine or extract expression values only."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfiles", "-i", type=str, required=True, help="Input file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--dir",
-        "-d",
-        type=str,
-        required=False,
-        help="Location of input & output files",
-        default=".",
-    )
-    subparser.add_argument(
-        "--outputdir",
-        "-O",
-        type=str,
-        required=False,
-        help="Output directory.",
-        default=".",
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file.",
-        default=constants.default_merged_counts,
-    )
-    subparser.add_argument(
-        "--outputtotals",
-        "-t",
-        type=str,
-        required=False,
-        help="Output file for totals.",
-        default=constants.default_total_counts,
-    )
-    subparser.add_argument(
-        "--rename_samples",
-        "-r",
-        type=str,
-        required=False,
-        help="Tab-delimited file with from/to pairs of sample IDs.",
-        default=constants.counts_sample_ID_file,
-    )
-    # subparser.add_argument("--ext", "-O", type=str, required=False, default= constants.default_merged_counts)
-
-    # featurecounts_ids
-    fn = "featurecounts_ids"
-    help_text ="Get sample/file IDs from featurecounts files"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    # subparser.add_argument("--dir", "-d", type=str, required=False, help="Dir where files of interest", default=".")
-    subparser.add_argument(
-        "--inputfiles", "-i", type=str, required=True, help="Input file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--outputdir",
-        "-O",
-        type=str,
-        required=False,
-        help="Output directory.",
-        default=".",
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file.",
-        default=constants.counts_sample_ID_file,
-    )
-
-    # add_gene_name
-    fn = "add_gene_name"
-    help_text ="Output expression by gene name if unique"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--species",
-        "-s",
-        type=str,
-        required=True,
-        help="On the origin of reads.",
-        choices=constants.known_species,
-    )
-    subparser.add_argument(
-        "--inputfile", "-i", type=str, required=False, help="Input file."
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        default=constants.default_counts_by_gene_name,
-        help="Output file."
-    )
-
-    # transformcounts
-    fn = "transformcounts"
-    help_text ="Calculate CPM or RPKM. Also output total counts."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfile", "-i", type=str, required=True, help="Input file."
-    )
-    subparser.add_argument(
-        "--method",
-        "-M",
-        type=str,
-        required=True,
-        help="What to calculate.",
-        choices=[
-            "CPM",
-            "CPM-UQ",
-            "CPM-UQ-log2",
-            "RPKM",
-            "RPKM-UQ",
-            "RPKM-UQ-log2",
-            "percentile",
-        ],
-    )
-    subparser.add_argument(
-        "--genenames",
-        "-n",
-        required=False,
-        help="Replace gene ID (ENGS/ENSMUS) with gene name if known and in gene metadata, else use ENS ID.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--genetypes",
-        "-g",
-        type=str,
-        required=False,
-        help='Gene type(s) to include. Set to all or "" for all',
-        nargs="+",
-        default=["protein_coding", "lncRNA"],
-    )
-    subparser.add_argument(
-        "--log2_offset",
-        "-l",
-        type=float,
-        required=False,
-        help="Offset added to values before taking log2.",
-        default=0.1,
-    )
-    subparser.add_argument(
-        "--metadata",
-        "-m",
-        type=str,
-        required=False,
-        help="File with gene metadata. Can be original featurecounts output.",
-        default=constants.default_gene_metadata,
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file. Defaults to {method}.txt",
-    )
-    subparser.add_argument(
-        "--outputtotals",
-        "-t",
-        type=str,
-        required=False,
-        help="Prefix for totals output files.",
-        default="total_counts",
-    )
-    subparser.add_argument(
-        "--overwrite",
-        "-w",
-        required=False,
-        help="Overwrite files if present.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--rescale_common_value",
-        "-r",
-        type=float,
-        required=False,
-        help="Target value of specified percentile after rescaling, in linear space.",
-        default=1000,
-    )
-    subparser.add_argument(
-        "--rescale_pct",
-        "-p",
-        type=int,
-        required=False,
-        help="Percentile to use for rescaling. Calculated after excluding 0.",
-        default=75,
-    )
-
-    # sumcounts
-    fn = "sumcounts"
-    help_text ="Calculate sum of counts for each sample."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfile", "-i", type=str, required=True, help="Input file."
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file. Stdout if omitted.",
-    )
-    subparser.add_argument(
-        "--overwrite",
-        "-w",
-        required=False,
-        help="Overwrite files if present.",
-        action="store_true",
-    )
-
-    # genebams
-    fn = "genebams"
-    help_text ="Make BAM files with gene-specific alignments."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--bams", "-b", type=str, required=True, help="Input BAM file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--regions", "-r", type=str, required=True, help="Gene regions file (bed)."
-    )
-    subparser.add_argument(
-        "--exec",
-        "-X",
-        required=False,
-        help="Execute command(s) instead of output.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--zipbams",
-        "-z",
-        required=False,
-        help="Make a zip file of all gene bam files",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--script", "-S", type=str, required=False, default=f"{fn}.sh", 
-        help='Output commands to bash script. Set to "" for stdout.',
-    )
-
-    # rnaspades
-    fn = "rnaspades"
-    help_text ="Assemble transcripts from gene-specific and unaligned reads with RNAspades."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--bams", "-b", type=str, required=True, help="Input BAM file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--cpus", "-c", type=int, required=False, default=constants.cpus - 1, help="CPUs."
-    )
-    subparser.add_argument(
-        "--exec",
-        "-X",
-        required=False,
-        help="Execute command(s) instead of output.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--genebams",
-        "-g",
-        type=str,
-        required=False,
-        help="Gene BAM file(s) if already created (*genes.bam).",
-        nargs="+",
-    )
-    subparser.add_argument(
-        "--mem",
-        "-m",
-        type=int,
-        required=False,
-        help="Memory in Gb.",
-        default=constants.rnaspades.sortmem,
-    )
-    subparser.add_argument(
-        "--regions", "-r", type=str, required=False, help="Gene regions file (bed)."
-    )
-    subparser.add_argument(
-        "--tempdir",
-        "-t",
-        type=str,
-        required=False,
-        help="Dir for temp files.",
-        default=constants.rnaspades.tempdir,
-    )
-    subparser.add_argument(
-        "--zipbams",
-        "-z",
-        required=False,
-        help="Make a zip file of all gene bam files",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--script",
-        "-S",
-        type=str,
-        required=False,
-        default=f"{fn}.sh",
-        help='Output commands to bash script. Set to "" for stdout.',
-    )
-
-    # abra2
-    fn = "abra2"
-    help_text ="Realign indels from BAM files with abra2."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--regions", "-r", type=str, required=True, help="Gene regions file (bed)."
-    )
-    subparser.add_argument(
-        "--bams",
-        "-b",
-        type=str,
-        required=False,
-        help="BAM file(s) with all alignments (not *genes.bam).",
-        nargs="+",
-    )
-    subparser.add_argument(
-        "--cpus", "-c", type=int, required=False, default=min(8, constants.cpus), help="CPUs."
-    )
-    subparser.add_argument(
-        "--exec",
-        "-X",
-        required=False,
-        help="Execute command(s) instead of output.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--genebams",
-        "-g",
-        type=str,
-        required=False,
-        help="Gene BAM file(s) if already created (*genes.bam).",
-        nargs="+",
-    )
-    subparser.add_argument(
-        f"--readtype",
-        "-t",
-        type=str,
-        required=False,
-        help="Read pairing",
-        choices=constants.read_types, #Literal["paired", "single"],
-    )
-    subparser.add_argument(
-        "--species",
-        "-s",
-        type=str,
-        required=False,
-        help="On the origin of reads.",
-        choices=constants.known_species,
-    )
-    subparser.add_argument(
-        "--zipbams",
-        "-z",
-        required=False,
-        help="Make a zip file of all gene bam files",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--script", "-S", type=str, required=False, default=f"{fn}.sh",
-        help='Output commands to bash script. Set to "" for stdout.'
-    )
-
-    # BAM files
-    
-    # species
-    fn = "species"
-    help_text ="Output species for every BAM file."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--bams", "-b", type=str, required=True, help="Input BAM file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file. Stdout if omitted.",
-    )
-
-    # readtype
-    fn = "readtype"
-    help_text ="Output read type (paired or single) for every BAM file."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--bams", "-b", type=str, required=True, help="Input BAM file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file. Stdout if omitted.",
-    )
-
-    # splitbyreadgroup
-    fn = "splitbyreadgroup"
-    help_text ="Split BAM file(s) by read group."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--bams", "-b", type=str, required=True, help="Input BAM file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--cpus", "-c", type=int, required=False, default=constants.cpus, help="CPUs."
-    )
-    subparser.add_argument(
-        "--script",
-        "-S",
-        type=str,
-        required=False,
-        default=f"{fn}.sh",
-        help='Output commands to bash script. Set to "" for stdout.',
-    )
-
-    # unsort
-    fn = "unsort"
-    help_text ="Sort BAM by read ID."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--bams", "-b", type=str, required=True, help="Input BAM file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--exec",
-        "-X",
-        required=False,
-        help="Execute command(s) instead of output.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--script",
-        "-S",
-        type=str,
-        required=False,
-        default="unsort.sh",
-        help='Output commands to bash script. Set to "" for stdout.',
-    )
-    subparser.add_argument(
-        "--sortcpus", "-C", type=int, required=False, default=int(constants.cpus / 2), help="CPUs."
-    )
-    subparser.add_argument("--sortmem", "-M", type=int, required=False, default=constants.sortmem, help="Memory.")
-
-    # junctions
-    fn = "junctions"
-    help_text ="Output command to extract junctions with regtools then sum counts for identical coordinates"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--bams", "-b", type=str, required=True, help="BAM file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--mincount", "-m", type=int, required=False, help="Minimum count", default=0
-    )
-    subparser.add_argument(
-        "--regions", "-r", type=str, required=False, help="Gene regions file (bed)."
-    )
-    subparser.add_argument(
-        "--ext", "-O", type=str, required=False, default="junctions.txt", help = "Extension for output files."
-    )
-    """
-    subparser.add_argument(
-        "--cpus", "-c", type=int, required=False, default=constants.cpus, help="CPUs."
-    )
-    subparser.add_argument(
-        "--species",
-        "-s",
-        type=str,
-        required=False,
-        help="On the origin of reads.",
-        choices=constants.known_species,
-    )
-    """
-
-
-    # minimap
-    fn = "minimap"
-    help_text ="Align fastas to genome"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfiles", "-i", type=str, required=True, help="Input file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--species",
-        "-s",
-        type=str,
-        required=True,
-        help="On the origin of reads.",
-        choices=constants.known_species,
-    )
-    subparser.add_argument(
-        "--cpus", "-c", type=int, required=False, default=constants.cpus, help="CPUs."
-    )
-    subparser.add_argument(
-        "--exec",
-        "-X",
-        required=False,
-        help="Execute command(s) instead of output.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--format",
-        "-f",
-        type=str,
-        required=False,
-        help="Output file type.",
-        default="bam",
-        choices=["sam", "bam"],
-    )
-    subparser.add_argument(
-        "--mem",
-        "-m",
-        type=str,
-        required=False,
-        help="Memory for each input batch",
-        default="3G",
-    )
-    subparser.add_argument(
-        "--script", "-S", type=str, required=False, default=f"{fn}.sh",
-        help='Output commands to bash script. Set to "" for stdout.'
-    )
-
-
-    # other utils
-    
-    # text_to_fasta
-    fn = "text_to_fasta"
-    help_text ="Convert tab-delimited file to fasta."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfile", "-i", type=str, required=False, help="Input file."
-    )
-    subparser.add_argument(
-        "--minlength", "-m", type=int, required=False, help="Minimum length", default=0
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file. Stdout if omitted.",
-    )
-
-    # fasta_to_text
-    fn = "fasta_to_text"
-    help_text ="Convert fasta file to tab-delimited text."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfile", "-i", type=str, required=False, help="Input file."
-    )
-    subparser.add_argument(
-        "--minlength", "-m", type=int, required=False, help="Minimum length", default=0
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file. Stdout if omitted.",
-    )
-
-
-    # join
-    fn = "join_files"
-    help_text ="Join two files on specified columns."
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfiles", "-i", type=str, required=True, help="Input file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--columns",
-        "-c",
-        type=str,
-        required=False,
-        help="Column(s) to use, as one (if identical) or two comma-separated lists.",
-        nargs="+",
-        default=["Sample_geo_accession", "experiment_alias"],
-    )
-    subparser.add_argument(
-        "--dedup",
-        "-d",
-        required=False,
-        help="Deduplicate columns after merging.",
-        action="store_true",
-    )
-    subparser.add_argument(
-        "--method",
-        "-M",
-        type=str,
-        required=False,
-        help="How to join.",
-        choices="inner outer left right",
-        default="inner",
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file. Stdout if omitted.",
-    )
-
-    # cat
-    fn = "concat_files"
-    help_text ="Concatenate files as dataframes, handle different columns"
-    subparser = args.add_subfunction(newfn=fn, help_text=help_text)
-    subparser.add_argument(
-        "--inputfiles", "-i", type=str, required=True, help="Input file(s).", nargs="+"
-    )
-    subparser.add_argument(
-        "--outputfile",
-        "-o",
-        type=str,
-        required=False,
-        help="Output file. Stdout if omitted.",
-    )
-
-    return args
+'''
 
 def ens_to_gene(args):
     gtf_chr =  0
@@ -4617,7 +3099,7 @@ def ens_to_gene(args):
     verify_that_paths_exist(inputfile)
     if not args.OVERWRITE:
         exit_if_files_exist(outputfile)
-    # (inputfile: FileName, *, outputfile: FileName|None=None, sort: bool = False, subset=["protein_coding"]):
+    # (inputfile: File_or_Dir, *, outputfile: File_or_Dir|None=None, sort: bool = False, subset=["protein_coding"]):
     gtf_features =  -1
     data = []
     with open(inputfile, "r") as tempin:
@@ -4669,7 +3151,7 @@ def gtf_to_coords(args):
     if not args.OVERWRITE:
         exit_if_files_exist(outputfile)
 
-    # (inputfile: FileName, *, outputfile: FileName|None=None, sort: bool = False, subset=["protein_coding"]):
+    # (inputfile: File_or_Dir, *, outputfile: File_or_Dir|None=None, sort: bool = False, subset=["protein_coding"]):
     gtf_chr =  0
     gtf_start =  3
     gtf_stop =  4
@@ -4735,13 +3217,186 @@ def gtf_to_coords(args):
     data.to_csv(outputfile, sep="\t", index=False)
     log_message(f"created {outputfile}")
 
+def find_star_index(index=None):
+    # takes basename of index, looks in indexstores
+    index = os.path.basename(index)
+    species = index.split(".")[0]
+    if not species in constants.known_species:
+        log_message(f"Unknown species {species}", exit_now=True)
+    for dir in constants.index_stores:
+        indexpath = os.path.join(dir, index)
+        if os.path.exists(indexpath):
+            if dir != constants.star.base_dir:
+                log_message(
+                    f"nice cp -r {indexpath} {constants.star.base_dir} &"
+                )  # , exit_now=True)
+            return indexpath, species
+    temp = "\n".join(constants.index_stores)
+    log_message(f"{index} not found in:\n{temp}", exit_now=True)
+
+# STAR
+
+def star_list_idx(args):
+    print(*constants.star_indexes, sep="\n") #"\n".join(find_star_indexes().keys()))
+
+def find_star_indexes():
+    # return an orderedDict with index as key and dir as value
+    index_path = OrderedDict()
+    for dir in constants.index_stores:
+        for index in map(
+            os.path.basename, map(os.path.dirname, glob.glob(f"{dir}/*/SAindex"))
+        ):
+            if not index in index_path.keys():
+                index_path[index] = dir
+                if not index.split(".")[0] in constants.known_species:
+                    log_message(
+                        f"Caution: {dir}/{index} is not in constants.known_species"
+                    )
+        return index_path
+
+
+def get_GEO_series_metadata_files(geo_id: str, *, unzip: bool=True)-> list[str]:
+    if not re.match(r"GSE\d+$", geo_id):
+        log_message("Species a series  ID e.g. GSE154891", exit_now=True)
+    # input = GEO series ID, e.g. GSE154891
+    # retrieves info for that GEO series: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE154891
+    # https://ftp.ncbi.nlm.nih.gov/geo/series/GSE239nnn/GSE239889/matrix/
+
+    matrix_files = []
+    url = f"https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={geo_id}"
+    log_message(f"fetching {url}")
+    ftp = ""
+    for line in execute_command(f"wget -O - {url}"):
+        if m := re.search(r'.+(ftp:.*?)".+Series Matrix File', line):
+            ftp = m.groups()[0]
+            #print(ftp)
+            break
+    if not ftp:
+        log_message(f"No series matrix file found in {url}")
+        return
+    url = ftp
+    ftp = ""
+    log_message(f"fetching {url}")
+    for line in execute_command(f"wget -O - {url}"):
+        if m := re.search(r'.+(ftp:.*?)".+_series_matrix', line):
+            ftp = m.groups()[0]
+            # print(ftp)
+            break
+    if not ftp:
+        log_message(f"No series matrix file found in {url}")
+        return
+
+    local_flat_files = []
+    local_gz_files = []
+    local_gz = os.path.basename(ftp)
+    local_file = local_gz.replace(".gz", "")
+    if os.path.exists(local_file):
+        log_message(f"{local_file} exists")
+        matrix_files.append(local_file)
+    elif os.path.exists(local_gz):
+        log_message(f"{local_gz} already retrieved")
+        matrix_files.append(local_gz)
+    else:
+        cmd = f"wget --quiet --no-clobber {ftp} 2> /dev/null"
+        log_message(f"executing {cmd}")
+        execute_command(cmd)
+        if os.path.exists(local_gz):
+            log_message(f"Retrieved {local_gz}")
+            matrix_files.append(local_gz)
+        else:
+            log_message(f"Failed to retrieve {local_gz} with {cmd}")
+    if unzip:
+        for i, file in enumerate(matrix_files):
+            if file.endswith(".gz"):
+                cmd = f"gunzip -q {file}"
+                log_message(f"executing {cmd}")
+                execute_command(cmd)
+                file.replace(".gz", "")
+
+    return matrix_files
+
+def metadata(args):
+    """
+    Procedure:
+        1. retrieve the available metadata from SRA, GEO and ENA, saving original files by study then source.
+        2. filter. reformat and separate by species
+        3. make scripts to retrieve supplementary files and NCBI recounts if available.
+        4. merge sample details with fastq details, choose a subset of the samples, and make a simple manifest
+        5. make a read-length-specific index if we don't have one already
+        6 start the alignments
+    """
+    studydir = os.path.realpath(args.STUDYDIR)
+    subdir = {s: os.path.join(studydir, s) for s in args.SOURCES}
+    check_dir_write_access(studydir + list(subdir.values()))
+    #source_for_id = {i : id_prefix_by_source.get(i[:4], "") for i in args.IDS}
+    #ids_by_source = {i: s for s in args.SOURCES for i in args.IDS if source_for_id[i] == s }
+    #unknown_ids = list(set(args.IDS) - set(source_for_ids.values()))
+
+    id_prefix_by_source = {"GEO": "GEO", "SRP": "SRA", "PRJ": "ENA"}
+'''    
+    if "SRA" in source_for_db = SRAweb()
+
+    g2=GEOparse.get_GEO(geo="GSE162198", silent=True, destdir="workspace/GSE162198")
+    response = db.sra_metadata(ID, detailed=True)
+    for source in source_for_ids.keys():
+        tempdir = subdir[source]
+ 
+     match source:
+        case "GEO":
+
+        def get_GEO_series_metadata_files(geo_id: str, outputdir: File_or_Dir)-> File_or_Dir:
+
+        >>> g2.relations
+        {'BioProject': ['https://www.ncbi.nlm.nih.gov/bioproject/PRJNA680934'], 'SRA': ['https://www.ncbi.nlm.nih.gov/sra?term=SRP294329']}
+
+        >>> gse.relations
+        {'BioProject': ['https://www.ncbi.nlm.nih.gov/bioproject/PRJNA1001347']}
+
+            return "Bad request"
+        case "SRA":
+            #d = _pysradb(["SRP294329"], outputdir = "workspace/pysradb",  outputfileprefix ="sra_", species = ["human", "mouse"],
+            #             expt_type = ["RNA-seq"])
+            #data, file = pySRAdb_get_metadata(ID = "SRP294329", outputdir = "workspace/pysradb/SRP294329", outputfileprefix = "pySRAdb")
+            #data = parse_SRA_metadata(data=data, ID = "SRP294329", species = ["Homo sapiens", "Mus musculus"], expt_type = "RNA-Seq", #outputfileprefix = file.replace(".txt","")) #os.path.join("workspace/pysradb/SRP294329", "pySRAdb"))
+            
+            data, file = pySRAdb_get_metadata(ID = "GSE239889", outputdir = "workspace/pysradb/SRP294329", outputfileprefix = "pySRAdb")
+            data = parse_SRA_metadata(data=data, ID = "GSE239889", species = ["Homo sapiens", "Mus musculus"], expt_type = "RNA-Seq", outputfileprefix = file.replace(".txt","")) #os.path.join("workspace/pysradb/SRP294329", "pySRAdb"))
+     case "ENA":
+            # we need SRP or PRJ for  ENA
+            data = get_ENA_fastq_list(ID = ID, outputfile)
+            data = parse_ENA_fastq_metadata(data, outputfile)
+
+            data = get_ENA_fastq_list(ID = "PRJNA931290", outputfile =  "workspace/pysradb/PRJNA931290")
+            data = reformat_ENA_fastq_list(data = data, outputfile = "workspace/pysradb/PRJNA931290.txt")
+            # if ena columns are not in SRA metadata,  get two columns from ENA fastq manifest.
+        sys.exit()
+   
+         case _:
+            log_message(f"unknown source {source}", exit_now=True)
+  
+'''
 
 if __name__ == "__main__":
-    constants = define_constants()
-    args = define_args()
+    constants.star_indexes = find_star_indexes()
+    #data, outputfile = get_ENA_fastq_list(ID = "PRJNA931290", outputdir =  "workspace/PRJNA931290/")
+    #data, outputfile = reformat_ENA_fastq_list(data = data, outputfile = outputfile)
+   
+    #files = get_GEO_metadata(ID = "GSE239889", outputdir = "workspace/dod")
+    #data, files = parse_SRA_metadata(*, data: pd.DataFrame, ID: str, species: str|list[str], expt_type: str|list[str], outputfileprefix: str = constants.file_prefix.pysradb, overwrite: bool=False):
+    #files = ["workspace/dod/GSE239889-GPL24247_series_matrix.txt", "workspace/dod/GSE239889-GPL24676_series_matrix.txt"]
+    #data, files = parse_GEO_matrix_files(files) #, species = ["Homo sapiens", "Mus musculus"], expt_type = "RNA-Seq")
+    
+
+    #get_GEO_series_metadata_files()
+    get_NCBI_counts(GEO_ID = "GSE239889", outputdir = "workspace/ncbi_counts")
+    get_NCBI_counts(GEO_ID = "GSE239mmn", outputdir = "workspace/ncbi_counts")
+    # mouse study - no NCBI data
+    get_NCBI_counts(GEO_ID = "GSE162198", outputdir = "workspace/ncbi_counts")
+    sys.exit()
+
+    args = define_args(constants)
     args.handle_args()
     fn = eval(args.func)
     fn(args.args)
-
 
 
