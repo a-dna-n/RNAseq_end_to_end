@@ -11,7 +11,9 @@ The reads may be in different place, but the ideal source is ENA since it lets u
 GEOparse and pySRAdb have excellent features, but neither knows about NCBI human recounts, and neither lets us choose which supplementary files to download depending on their contents. GEOparse only uses soft-formatted files, which are problematic in studies with human and mouse samples.
 
 """
-
+"""
+GSE154783, GSE228268  = c. sabaeus
+"""
 import sys
 import os
 from modules.tools import *
@@ -25,67 +27,137 @@ from textwrap import dedent
 from collections import OrderedDict, Counter
 from types import SimpleNamespace
 import pandas as pd
-import numpy as npf
+import numpy as np
 from pysradb.sraweb import SRAweb
 #import GEOparse
 from modules.arg_def import *
-from lxml import html
-import requests
+from typing import Literal, Optional # TypeAlias, Union
+#from lxml import html
+#import requests
 constants = define_constants()
 
+from cyclopts import App as cyc_App, Group as cyc_Group, Parameter
+from dataclasses import dataclass, KW_ONLY
 
-def pySRAdb_convert(*, fn: str, id: str) ->str:
+cyc_app = cyc_App(help = "Functions for RNA-seq data and metadata.")
+# function groups
+metadata = cyc_Group.create_ordered("metadata")
+buildrefs = cyc_Group.create_ordered("buildrefs")
+align = cyc_Group.create_ordered("align")
+counts = cyc_Group.create_ordered("counts")
+assembly = cyc_Group.create_ordered("assembly")
+bamfiles = cyc_Group.create_ordered("bamfiles")
+utils = cyc_Group.create_ordered("utils")
+
+
+test_cases_GEO = {
+    # mouse - first study has multiple data types - should be filtered
+    "mouse": "GSE275562 GSE263778 GSE286314".split(),
+    # human - some have both  NCBI and author data
+    "human": "GSE213519 GSE173475 GSE233661".split(),
+    # chicken, zebrafish etc. - should not produce outputs beyond matrix files
+    "xeno": "GSE278071 GSE87528 GSE283071 GSE276850".split(),
+    # invalid ID but gets a response from GEO
+    "invalid" : ["GSE239mmn"]
+}
+
+'''
+# additional tests
+PRJNA931290
+SRP294329
+SRP326996
+SRP452987
+GSE179462
+SRP326996
+'''
+
+
+
+@cyc_app.command(group=metadata)
+def _pySRAdb_convert_ID(*, ID: str, fn: str) ->str:
+    """Simplistically calls pysradb to convert an ID using a specific function.
+    
+        > pysradb gsm-to-gse GSM4679562
+        study_alias	study_accession
+        GSE154783	SRP272683
+
+    Args:
+        ID (str): the ID to convert
+        fn (str): the function to use
+
+    Returns:
+        str: ID in the specified namespace, e.g. GSE154783 in the example above
     """
-    Calls pysradb to convert IDs using a specific function
-    > pysradb gsm-to-gse GSM4679562
-    study_alias	study_accession
-    GSE154783	SRP272683
-    """
-    cmd = f"pysradb {fn} {id}"
+    cmd = f"pysradb {fn} {ID}"
     log_message(cmd)
     temp = execute_command(cmd)
-
     prefix = fn[-3:].upper()
-    # print(f"fn {fn} id {id} prefix {prefix}")
     if len(temp) == 2:
-        new_ids = temp[-1].rstrip().split()
+        new_IDs = temp[-1].rstrip().split()
         # new_id = temp[-1].rstrip().split()[1]
-        for new_id in new_ids:
-            if new_id.startswith(prefix):
-                log_message(f"{id} => {new_id}")
-                return new_id
-    log_message(f"Invalid output:", *temp, sep="\n\t")
+        for new_ID in new_IDs:
+            if new_ID.startswith(prefix):
+                log_message(f"{ID} => {new_ID}")
+                return new_ID
+    log_message(f"Unexpected output from pysradb:", *temp, sep="\n\t")
     return ""
 
-def pySRAdb_get_metadata(ID: str, *, outputdir: File_or_Dir, outputfileprefix: str = constants.file_prefix.pysradb) -> pd.DataFrame:
-    # , species: str|list[str], expt_type: str|list[str]# 
+
+@Parameter(name="*")
+@dataclass
+class _metadata_args:
+
+    ID: str
+    "SRA study ID, e.g. SRP294329"
+
+    _: KW_ONLY
+    
+    outputdir: File_or_Dir
+    "Folder where metadata files will be stored."
+
+    outputfileprefix: str = constants.file_prefix.pysradb
+    "Prefix for output file (base)names, to coerce nominal documentation of sources."
+
+# def pySRAdb_get_metadata(ID: str, *, outputdir: File_or_Dir, outputfileprefix: str = constants.file_prefix.pysradb) -> pd.DataFrame:
+
+@cyc_app.command(group=metadata)
+def pySRAdb_get_metadata(args: _metadata_args) -> pd.DataFrame:
+    """Find metadata and files available from SRA, GEO and and ENA.
+    
+    Args:
+        args (_metadata_args): work in progress
+
+    Returns:
+        pd.DataFrame: if the ID is valid, returns a table populated with sample and fastq file info
+      
+    """    
     log_message(f"Retrieving metadata from SRA.")
-    if not ID.startswith("SRP"):
-        log_message(f"{ID} may not work. pySRAdb needs an SRP ID, e.g. SRP247494")
+    if not args.ID.startswith("SRP"):
+        log_message(f"{args.ID} may not work. pySRAdb needs an SRP args.ID, e.g. SRP247494")
 
     # Get metadata for a study, save it as is.
-    check_dir_write_access(outputdir)
-    if os.path.basename(outputfileprefix) != outputfileprefix:
+    check_dir_write_access(args.outputdir)
+    if os.path.basename(args.outputfileprefix) != args.outputfileprefix:
         log_message("Output file prefix cannot include directory", exit_now=True)
 
-    if not constants.file_prefix.pysradb.lower() in outputfileprefix.lower():
-        outputfileprefix = "_".join([outputfileprefix, constants.file_prefix.pysradb]) #{outputfileprefix}_pySRAdb"
-    if not ID in outputfileprefix:
-        outputfileprefix =  "_".join([outputfileprefix, ID])
+    if not constants.file_prefix.pysradb.lower() in args.outputfileprefix.lower():
+        args.outputfileprefix = "_".join([args.outputfileprefix, constants.file_prefix.pysradb]) #{args.outputfileprefix}_pySRAdb"
+    if not args.ID in args.outputfileprefix:
+        args.outputfileprefix =  "_".join([args.outputfileprefix, args.ID])
     
-    outputfile = os.path.join(outputdir, outputfileprefix + ".txt")
+    outputfile = os.path.join(args.outputdir, args.outputfileprefix + ".txt")
     if os.path.exists(outputfile):
         log_message(f"reading pySRAdb metadata from local file {outputfile}")
         return pd.read_csv(outputfile, sep="\t", header = 0, dtype=object), outputfile
     else:
         db = SRAweb()
-        response = db.sra_metadata(ID, detailed=True)
+        response = db.sra_metadata(args.ID, detailed=True)
         if response.shape[0]:
             response.to_csv(outputfile, sep="\t",  index=False)
-            log_message(f"pySRAdb metadata for {ID} written to {outputfile}")
+            log_message(f"pySRAdb metadata for {args.ID} written to {outputfile}")
             return response, outputfile
         else:
-            log_message(f"No metadata for {ID} via pySRAdb.")
+            log_message(f"No metadata for {args.ID} via pySRAdb.")
             return None,  None
 
 
@@ -441,21 +513,29 @@ def reformat_ENA_fastq_list(data: pd.DataFrame, *, outputfile: File_or_Dir|None=
         log_message(f"Reformatted ENA fastq list {outputfile}")
     return data
 
+
+def test_get_ENA_fastq_list():
+    data, outputfile = get_ENA_fastq_list(ID = "PRJNA931290", outputdir =  "test/ENA/PRJNA931290")
+    data, outputfile = reformat_ENA_fastq_list(data = data, outputfile = outputfile)
+
+
 def transpose_nested_list(*, data: list):
     # M x N list becomes N x M
     return [list(x) for x in zip(*data)]
 
 
 def  test_URL(url):
-    # requests library doesn't cope with ftp
-    # direct version: wget --spider -O - 'https://wwww....' 2>&1 |grep 'Remote file exists.' 
-
-    if response := execute_command(f"wget --spider {url}", splitlines=False):
-        if "Remote file exists" in response:
-            return True
+    cmd = f"wget -o - --spider {url}"
+    if response := execute_command(cmd):
+        for line in response:
+            if "Remote file exists" in line:
+                return response
+            if line.startswith("File ") and line.endswith(" exists."):
+                return response
     return False
 
-def get_GEO_metadata(ID: str, outputdir: File_or_Dir, outputfileprefix: str = constants.file_prefix.geo)-> File_or_Dir:
+def get_GEO_metadata(ID: str, outputdir: File_or_Dir, list_files: bool = False)-> File_or_Dir: #, outputfileprefix: str = constants.file_prefix.geo
+
     if not re.match(r"GSE\d+$", ID):
         log_message("Species a series  ID e.g. GSE154891", exit_now=True)
     # input = GEO series ID, e.g. GSE154891
@@ -467,15 +547,14 @@ def get_GEO_metadata(ID: str, outputdir: File_or_Dir, outputfileprefix: str = co
     # https://ftp.ncbi.nlm.nih.gov/geo/series/GSE239nnn/GSE239889/matrix/
 
     check_dir_write_access(outputdir)
-    if os.path.basename(outputfileprefix) != outputfileprefix:
-        log_message("Output file prefix cannot include directory", exit_now=True)
-
-    matrix_page = f"https://ftp.ncbi.nlm.nih.gov/geo/series/{ID[:-3]}nnn/{ID}/matrix"
+    #if os.path.basename(outputfileprefix) != outputfileprefix:
+    #    log_message("Output file prefix cannot include directory", exit_now=True)
+    series_ftp_base = f"https://ftp.ncbi.nlm.nih.gov/geo/series/{ID[:-3]}nnn/{ID}"
+    matrix_page = f"{series_ftp_base}/matrix"
     matrix_file_urls = []
     for line in execute_command(f"wget -O  - -q {matrix_page}"):
-        line = line.rstrip()
         if "series_matrix.txt.gz" in line:
-            temp = line.split('"')[1]
+            temp = line.rstrip().split('"')[1]
             if temp.startswith("GSE") and temp.endswith(".gz"):
                  matrix_file_urls.append(f"{matrix_page}/{temp}")
             else:
@@ -490,17 +569,31 @@ def get_GEO_metadata(ID: str, outputdir: File_or_Dir, outputfileprefix: str = co
             #log_message(f"{local_file} present")
             #local_files.append(local_file)
         elif os.path.exists(local_gz):
-            log_message(f"{local_gz} present")
+            log_message(f"{local_gz} present - unip")
             execute_command(f"gunzip {local_gz}")
         else:
             
             #log_message(f"calling {cmd}")
-            execute_command(cmd = f"wget -P {outputdir} {url}")
+            execute_command(f"wget -P {outputdir} {url}")
             execute_command(f"gunzip {local_gz}")
         if os.path.exists(local_file):
             local_files.append(local_file)
         else:
             log_message(f"Download or gunzip error for {url} - {local_gz} not found", exit_now=True)
+    
+    # retrieve filelist.txt if it exists
+    file_list_url = f"{series_ftp_base}/suppl/filelist.txt"
+    local_file_list = os.path.join(outputdir, os.path.basename(file_list_url))
+    if os.path.exists(local_file_list):
+        local_files.append(local_file_list)
+    else:
+        if test_URL(file_list_url):
+            execute_command(f"wget --no-verbose --no-clobber -P {outputdir} {file_list_url}")
+            local_files.append(local_file_list)
+        else:
+            log_message(f"{file_list_url} not found for {ID}")
+    if list_files:
+        log_message(f"metadata files for {ID}:", *local_files, sep="\n\t")
     return local_files
 
 def get_NCBI_counts(GEO_ID: str, outputdir: File_or_Dir): #, destdir: File_or_Dir | None = None):
@@ -527,7 +620,7 @@ def get_NCBI_counts(GEO_ID: str, outputdir: File_or_Dir): #, destdir: File_or_Di
         {base_URL} / ? type=rnaseq_counts & acc={GEO_ID} & format=file & file= {GEO_ID}_norm_counts_TPM_GRCh38.p13_NCBI.tsv.gz
         {base_URL} / ? type=rnaseq_counts                & format=file & file= Human.GRCh38.p13.annot.tsv.gz
     """
-    script = os.path.join(outputdir, f"{constants.geo_fetch_NCBI_counts}{GEO_ID}.sh")
+    script = os.path.join(outputdir, f"{constants.geo_fetch_NCBI_counts}_{GEO_ID}.sh")
     if os.path.exists(script):
         log_message(f"{script} exists for {GEO_ID}")
         return
@@ -635,7 +728,7 @@ def get_NCBI_counts(GEO_ID: str, outputdir: File_or_Dir): #, destdir: File_or_Di
         output.append(f"wget --no-clobber -q -O {file} 'https://www.ncbi.nlm.nih.gov{f}'")
     """
 
-def matrix_to_dataframe(inputfile):
+def matrix_to_dataframes(inputfile):
     all_data  = []
     entities = set()
     with open(inputfile, "r") as tempin:
@@ -648,11 +741,11 @@ def matrix_to_dataframe(inputfile):
     data_by_entity = {}
     for ent in entities:
         data_by_entity[ent] = list(filter(lambda row: row[0] == ent, all_data))
+
     sample_data = data_by_entity["Sample"]
     test = [x[1] for x in sample_data]
     exclude = set()
     skip_if_match = "channel_count data_row_count platform_id status type growth_protocol".split(" ")
-    skip = "channel_count data_row_count platform_id status type growth_protocol".split(" ")
     skip_if_contain = "contact extract_protocol growth_protocol _date".split(" ")
     for i in test:
         if any(i in s for s in skip_if_match):
@@ -688,39 +781,134 @@ def matrix_to_dataframe(inputfile):
     sample_data = unique_row_headers(sample_data)
     sample_data = [[x[0]] + x[1] for x in sample_data]
     temp = transpose_nested_list(data=sample_data)
-    return  pd.DataFrame(temp[1:], columns=temp[0])
+    sample_metadata = pd.DataFrame(temp[1:], columns=temp[0])
+
+    series_data = [x[1:] for x in data_by_entity["Series"]]
+    row_headers = [x[0] for x in series_data]
+    exclude = set()
+    skip_if_match = "status contributor".split(" ")
+    skip_if_contain = "contact _date platform_".split(" ")
+    for i in row_headers:
+        if any(i in s for s in skip_if_match):
+            exclude.add(i)
+            continue
+        if any(s in i for s in skip_if_contain):
+            exclude.add(i)
+            continue
+    series_data  = [[x[0]] + x[1] for x in series_data if not x[0] in exclude]
+    id_mapping = {"geo_accession" : "study", "SRA" : "SRP", "BioProject"  : "bioproject",  "pubmed_id" : "Pubmed"}
+    ids_found = {}
+
+    for i, x in enumerate(series_data):
+        if mapping := id_mapping.get(x[0], None):
+            ids_found[mapping] = x[1]
+        match x[0]:
+            case "sample_taxid":
+                if org := constants.species_tax_code.get(x[1], ""):
+                    series_data.append(["species", org])
+                    if not "organism" in sample_metadata.columns:
+                        log_message("Rescue org/species here")
+                    #series_data[i] = ["species", org]
+            case "relation":
+                temp = x[1].split(": ", 1)
+                if len(temp) > 1:
+                    match temp[0]:
+                        case "SRA":
+                            temp[1] = temp[1].split("=")[1]
+                        case "BioProject":
+                            temp[1] = temp[1].split("/")[-1]
+                    series_data.append(temp)
+                    if mapping := id_mapping.get(temp[0], None):
+                        ids_found[mapping] = temp[1]
+    for key in reversed(id_mapping.values()):
+        if key in ids_found:
+            sample_metadata.insert(0, key, ids_found[key])
+
+    series_metadata = pd.DataFrame(series_data, columns=["field", "value"])
+
+    return sample_metadata, series_metadata
+
     
-def parse_GEO_matrix_files(inputfiles): #, *, species: str|list[str], expt_type: str|list[str], outputfileprefix: str = constants.file_prefix.geo, overwrite: bool=False):
+def parse_GEO_matrix_files(inputfiles, *, species: str|list[str]|None=None, expt_type: str|list[str]|None=None, outputfileprefix: str = constants.file_prefix.geo, overwrite: bool=False):
     # input = name of a series matrix file
     # output = a dataframe with sample-specific info and a dataframe with common entries
-    return_data =[]
+    # to do: check species & exp type
+    #return_data =[]
     return_files = []
-    """
-    if isinstance(species, str):
+    if species is not None and isinstance(species, str):
         species = [species]
-    if isinstance(expt_type, str):
+    if expt_type is not None and isinstance(expt_type, str):
          expt_type = [expt_type]
-    """
     for matrix_file in inputfiles:
+        if not "matrix.txt" in matrix_file:
+            log_message(f"Skipping {matrix_file}")
+            continue
         matrix_file = matrix_file.replace(".gz", "")
         gz = f"{matrix_file}.gz"
         if (not os.path.exists(matrix_file)) and os.path.exists(gz):
             execute_command(f"gunzip {gz}")
         verify_that_paths_exist(matrix_file)
-        data = matrix_to_dataframe(matrix_file)
-        verify_columns_present_in_dataframe(data=data, columns=["organism", "library_strategy"], source=matrix_file)
-        for org in data["organism"].unique().tolist():
-            for assay in data["library_strategy"].unique().tolist():
-                outputfile = "_".join([matrix_file.replace(".txt",""), constants.species_unalias[org], assay]) + ".txt"
-                mask = (data["organism"] == org) & (data["library_strategy"] == assay)
-                tempdata = data[mask].copy()
-                print(f"{matrix_file} {org} {assay} {tempdata.shape[0]}")
-                tempdata.to_csv(outputfile, sep="\t", index=False)
-                log_message(f"Input matrix:\n\t{matrix_file}\nconverted to:\n\t{outputfile}\nfor {org} and {assay}")
-                return_data.append(tempdata)
-                return_files.append(outputfile)
+        log_message(f"\nParsing {matrix_file}")
+        sample_metadata, series_metadata = matrix_to_dataframes(matrix_file)
 
-    return return_data, return_files
+        #sample_metadata.to_csv("sample_metadata", sep="\t", index=False)
+        #series_metadata.to_csv("series_metadata", sep="\t")
+        #sys.exit()
+
+        verify_columns_present_in_dataframe(data=sample_metadata, columns=["organism", "library_strategy"], source=matrix_file)
+        assays_in_data = sample_metadata["library_strategy"].unique().tolist()
+        log_message(f"Types of data in this series or subseries:", *assays_in_data, sep="\t")
+        if expt_type:
+            N_initial = sample_metadata.shape[0]
+            mask = sample_metadata["library_strategy"].isin(expt_type)
+            sample_metadata = sample_metadata[mask].copy()
+            if sample_metadata.shape[0] == 0:
+                log_message(f"No samples match the specified experiment type(s).")
+            else:
+                log_message(f"{sample_metadata.shape[0]} rows out of {N_initial} were selected by type of data")
+        organisms_in_data = sample_metadata["organism"].unique().tolist()
+        log_message(f"Organisms found in this series or subseries:", *organisms_in_data, sep="\t")
+        if len(organisms_in_data) > 1:
+             log_message(f"Warning: multiple species were found in the same matrix file {matrix_file}.")
+        if species:
+            N_initial = sample_metadata.shape[0]
+            mask = sample_metadata["organism"].isin(species)
+            sample_metadata = sample_metadata[mask].copy()
+            if sample_metadata.shape[0] == 0:
+                log_message(f"No samples match the specified organism(s).")
+            else:
+                log_message(f"{sample_metadata.shape[0]} rows out of {N_initial} were selected by organism")
+        for org in sample_metadata["organism"].unique().tolist():
+            for assay in sample_metadata["library_strategy"].unique().tolist():
+                outputfile = "_".join([matrix_file.replace(".txt",""), constants.species_unalias[org], assay]) + ".txt"
+                mask = (sample_metadata["organism"] == org) & (sample_metadata["library_strategy"] == assay)
+                tempdata = sample_metadata[mask].copy()
+                if columns_to_drop := [col for col in tempdata.columns if set(tempdata[col]) in [{'NONE'}, {""}]]:
+                    #vals = {col : set(tempdata[col]) for col in tempdata.columns}
+                    #if columns_to_drop := [col for col, vals in vals.items() if len(vals)==1  and (vals[0] in ["NONE",  ""])]:
+                    tempdata.drop(columns = columns_to_drop, inplace=True)
+
+                for col in tempdata.columns:
+                    splits = [str(x).split(": ") for x in tempdata[col]]
+                    test = splits[0][0]
+                    if all([(len(x) == 2 and x[0] == test) for x in splits]):
+                        tempdata[col] = [x[1] for x in splits]
+                        tempdata.rename(columns = {col : test}, inplace=True)
+
+                tempdata.to_csv(outputfile, sep="\t", index=False)
+                log_message(f"Matrix {matrix_file} converted to:\n\t{outputfile}\nfor {org} and {assay}\n")
+                #return_data.append(tempdata)
+                return_files.append(outputfile)
+        # output parsed version of series matrix file, script to retrieve author suppplementary files
+        outputfile = matrix_file.replace(".txt","_table.txt")
+        series_metadata.to_csv(outputfile, sep="\t", index=False)
+        #print(f"{matrix_file} {org} {assay} {tempdata.shape[0]}")
+        log_message(f"Series matrix {matrix_file} parsed, reformatted, written to {outputfile}\n")
+        #geo_fetch_author_supp = "get_author_supplementary_files_from_GEO_"
+        #return_data.append(tempdata)
+        return_files.append(outputfile)
+
+    return return_files
 
     """
         all_data  = []
@@ -782,63 +970,98 @@ def parse_GEO_matrix_files(inputfiles): #, *, species: str|list[str], expt_type:
         
     return  pd.DataFrame(b[1:], columns=b[0])
     """
-
-
 """
 
         script = f"{constants.geo_fetch_author_supp}_{ID}.sh"
         geo_find_supplementary_files(files=matrix_files, outputfile=script)
 
-
-
 """
 
-
-
 def geo_find_supplementary_files(
-    *, files: list[File_or_Dir], outputfile: File_or_Dir, overwrite: bool = False
+    *, input: File_or_Dir|list[File_or_Dir], outputdir: File_or_Dir, ID: str, overwrite: bool = False
 ):
     # input = list of series matrix files
-    # output = bash script to retrieve any supplementary files, or None if None
-    verify_that_paths_exist(files)
-    if os.path.exists(outputfile) and overwrite is False:
-        log_message(f"{outputfile} exists")
-        return outputfile
+    # output = Bash script to retrieve any supplementary files, or None if None
+    #verify_that_paths_exist(files)
+    check_dir_write_access(outputdir)
+    files = []
+    if isinstance(input, File_or_Dir):
+        input = [input]
+    for i in input:
+        if os.path.isdir(i):
+            if temp := glob.glob(f"{i}/*series_matrix.txt"):
+                files.extend(temp)
+            else:
+                log_message(f"No matrix files found in {i}")
+        elif os.path.isfile(i):
+            if i.endswith("series_matrix.txt"):
+                files.append(i)
+            else:
+                log_message(f"{i} is an invalid name for a matrix file")
+        else:
+            log_message(f"Skipping {i}")
+    if not files:
+        log_message(f"No matrix files")
+        return
+    script = f"{constants.geo_fetch_author_supp}_{ID}.sh"
+    script = os.path.join(outputdir, script)
+    if not overwrite:
+        exit_if_files_exist(script)
+
     output = []
+    output.append(dedent(f"""
+        #!/bin/bash
+        set -e
+        # fetch supplementary files posted by authors of {ID} in GEO
+        # destination dir is where this Bash script resides
+        dest_dir=$(dirname ${{BASH_SOURCE}})
+
+        get() {{
+            url=$1
+            local_file=${{dest_dir}}/$(basename ${{url}})
+            echo "wget -nc -nv -O ${{local_file}} ${{url}}"
+        }}
+
+    """))
+        
+    ftp_files_found = []
     # log_message("Ignore warnings like: Execution of wget -nc --spider ftp://... failed.")
     for matrix_file in files:
+        if matrix_file.endswith(".gz"):
+            matrix_file = matrix_file.replace(".gz", "")
+            if not os.path.exists(matrix_file):
+                execute_command(f"gunzip {matrix_file}.gz")
         tempoutput = []
-        cmd = {"gz": "zcat", "txt": "cat"}.get(matrix_file.split(".")[-1], "")
-        if cmd == "":
-            log_message(f"Unknown extension in {matrix_file} - skipping")
-            continue
-        for temp in execute_command(
-            f"{cmd} {matrix_file} | grep ^.Series_supplementary_file 2> /dev/null"
-        ):
-            url = temp.split('"')[1]
-            if url.startswith("ftp"):
-                spider_log_file = f"{os.path.basename(url)}.size"
-                execute_command(
-                    f"wget -nc --spider {url} 2> {spider_log_file}",
-                    suppress_error_messages=True,
-                )
-                for g in execute_command(f'grep -i -P "length|size" {spider_log_file}'):
-                    tempoutput.append(f"# {g}")
-                tempoutput.append(f"wget -nc -q {url}\n")
-                os.remove(spider_log_file)
-            else:
-                log_message(f"Malformed FTP URL in {temp}", exit_now=True)
+        with open(matrix_file, "r") as tempin:
+            lines = tempin.readlines()
+        for line in lines:
+            if line.startswith("!Series_supplementary_file"):
+                url = line.split('"')[1]
+                if url in ftp_files_found:
+                    continue
+                if url.startswith("ftp"):
+                    if response := test_URL(url):
+                        b = os.path.basename(url)
+                        for g in response:
+                            if f"SIZE {b}" in g:
+                                temp = g.rstrip().split()[-1]
+                                tempoutput.append(f"# {b} = {int(temp):,} bytes")
+                                break
+                        tempoutput.append(f"get {url}\n")
+                        ftp_files_found.append(url)
+                else:
+                    log_message(f"Malformed FTP URL in {line} from {matrix_file}", exit_now=True)
         if tempoutput:
-            output.append(f"# source: {matrix_file}")
+            #output.append(f"# source: {matrix_file}\n")
             output += tempoutput
-    if output:
-        output  = [bash_header()] + output
-        with open(outputfile, "w") as tempout:
+    if ftp_files_found:
+        with open(script, "w") as tempout:
             print(*output, sep="\n", file=tempout)
-        os.chmod(outputfile, 0o755)
-        log_message(f"source {outputfile} &")
-        return outputfile
+        os.chmod(script, 0o755)
+        log_message(f"created {script}")
+        return script
     else:
+        log_message(f"No FTP file URLs found.")
         return None
 
 def geo(args):
@@ -942,15 +1165,15 @@ def geo(args):
 
         for i, file in enumerate(matrix_files):
 
-            metadata = matrix_to_dataframe(file)
-            metadata.insert(0, "study", id)
-            metadata.insert(1, "SRP", SRP)
-            metadata.insert(2, "source_", subseries[i])
-            metadata = dedup_cols(data=metadata)
-            metadata.to_csv(output_files[i], sep="\t", index=False)
+            sample_metadata, series_metadata = matrix_to_dataframes(file)
+            sample_metadata.insert(0, "study", id)
+            sample_metadata.insert(1, "SRP", SRP)
+            sample_metadata.insert(2, "source_", subseries[i])
+            sample_metadata = dedup_cols(data=sample_metadata)
+            sample_metadata.to_csv(output_files[i], sep="\t", index=False)
             log_message(f"Metadata written to {output_files[i]}")
         if SRP:
-            SRP = pySRAdb_convert(fn="gse-to-srp", id=id)
+            SRP = _pySRAdb_convert_ID(fn="gse-to-srp", id=id)
             log_message(f"SRP for {id} is {SRP}")
             sra_output = f"{SRP}.sra.txt"
             if not os.path.exists(sra_output):
@@ -980,8 +1203,28 @@ def geo(args):
                     log_message(f"No matched columns in {outputfile} and {sra_output}")
 
 
-#parsed = parse_pySRA_output(data, species=species, expt_type = expt_type)
+def test_get_GEO_series_metadata_files():
 
+    for species, studies in test_cases_GEO.items():
+        base_output_dir = f"test/GEO_metadata/{species}"
+        for ID in studies:
+            files = get_GEO_metadata(ID = ID, outputdir = f"{base_output_dir}/{ID}", list_files=True)
+            files = parse_GEO_matrix_files(files, species = ["Homo sapiens", "Mus musculus"], expt_type = "RNA-Seq")
+
+def test_get_NCBI_counts():
+
+    for species, studies in test_cases_GEO.items():
+        base_output_dir = f"test/NCBI_counts/{species}"
+        for ID in studies:
+            get_NCBI_counts(GEO_ID = ID, outputdir = f"{base_output_dir}/{ID}")
+          
+def  test_geo_find_supplementary_files():
+
+    for species, studies in test_cases_GEO.items():
+        base_input_dir = f"test/GEO_metadata/{species}"
+        base_output_dir = f"test/GEO_author_files/{species}"
+        for ID in studies:
+            geo_find_supplementary_files(input=f"{base_input_dir}/{ID}", outputdir=f"{base_output_dir}/{ID}", ID=ID, overwrite=True) 
 
 def bam_species(args):
     if args.OUTPUTFILE:
@@ -2481,11 +2724,12 @@ def merge_counts(args):
     outputdir = args.OUTPUTDIR.rstrip("/")
     totals = args.TOTALS
     if outputdir:
-        if outputfile and os.sep in outputfile:
+        #if outputfile and os.sep in outputfile:
+        if outputfile and os.path.basename(args.outputfile) != args.outputfile:
             log_message(
                 "outputfile cannot include dir if outputdir is specified", exit_now=True
             )
-        if totals and os.sep in totals:
+        if totals and os.path.basename(totals) != totals:
             log_message(
                 "output file for totals cannot include dir if outputdir is specified",
                 exit_now=True,
@@ -3328,9 +3572,6 @@ def metadata(args):
     studydir = os.path.realpath(args.STUDYDIR)
     subdir = {s: os.path.join(studydir, s) for s in args.SOURCES}
     check_dir_write_access(studydir + list(subdir.values()))
-    #source_for_id = {i : id_prefix_by_source.get(i[:4], "") for i in args.IDS}
-    #ids_by_source = {i: s for s in args.SOURCES for i in args.IDS if source_for_id[i] == s }
-    #unknown_ids = list(set(args.IDS) - set(source_for_ids.values()))
 
     id_prefix_by_source = {"GEO": "GEO", "SRP": "SRA", "PRJ": "ENA"}
 '''    
@@ -3344,9 +3585,7 @@ def metadata(args):
      match source:
         case "GEO":
 
-        def get_GEO_series_metadata_files(geo_id: str, outputdir: File_or_Dir)-> File_or_Dir:
-
-        >>> g2.relations
+       >>> g2.relations
         {'BioProject': ['https://www.ncbi.nlm.nih.gov/bioproject/PRJNA680934'], 'SRA': ['https://www.ncbi.nlm.nih.gov/sra?term=SRP294329']}
 
         >>> gse.relations
@@ -3376,27 +3615,17 @@ def metadata(args):
   
 '''
 
+
 if __name__ == "__main__":
-    constants.star_indexes = find_star_indexes()
-    #data, outputfile = get_ENA_fastq_list(ID = "PRJNA931290", outputdir =  "workspace/PRJNA931290/")
-    #data, outputfile = reformat_ENA_fastq_list(data = data, outputfile = outputfile)
-   
-    #files = get_GEO_metadata(ID = "GSE239889", outputdir = "workspace/dod")
-    #data, files = parse_SRA_metadata(*, data: pd.DataFrame, ID: str, species: str|list[str], expt_type: str|list[str], outputfileprefix: str = constants.file_prefix.pysradb, overwrite: bool=False):
-    #files = ["workspace/dod/GSE239889-GPL24247_series_matrix.txt", "workspace/dod/GSE239889-GPL24676_series_matrix.txt"]
-    #data, files = parse_GEO_matrix_files(files) #, species = ["Homo sapiens", "Mus musculus"], expt_type = "RNA-Seq")
-    
 
-    #get_GEO_series_metadata_files()
-    get_NCBI_counts(GEO_ID = "GSE239889", outputdir = "workspace/ncbi_counts")
-    get_NCBI_counts(GEO_ID = "GSE239mmn", outputdir = "workspace/ncbi_counts")
-    # mouse study - no NCBI data
-    get_NCBI_counts(GEO_ID = "GSE162198", outputdir = "workspace/ncbi_counts")
+    test_geo_find_supplementary_files()
+    test_get_NCBI_counts()
+    test_get_GEO_series_metadata_files()
+    test_get_ENA_fastq_list()
     sys.exit()
-
+    constants.star_indexes = find_star_indexes()
     args = define_args(constants)
     args.handle_args()
     fn = eval(args.func)
     fn(args.args)
-
-
+    #cyc_app()

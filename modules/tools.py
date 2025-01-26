@@ -1,9 +1,9 @@
 import sys
 import os
-#from collections import OrderedDict, Counter
+from collections import Counter
 import subprocess
 from typing import TypeAlias, Union #, Literal
-
+import  shlex
 
 File_or_Dir: TypeAlias = Union[str | bytes | os.PathLike]
 
@@ -31,15 +31,22 @@ def execute_command(
     exit_on_error: bool = False,
     splitlines: bool = True,
 ):
+    
+    with subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
+        output = process.communicate()[0]
+    output = output.decode("utf-8") #.rstrip(')
+    """
     try:
         output = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
     except:
-        #log_message(f"Execution failed: {command}", exit_now = exit_on_error)
+        log_message(f"Execution failed: {command}", exit_now = exit_on_error)
         return []
-    output = output.decode("utf-8").rstrip('\n')
+    output = output.decode("utf-8") #.rstrip(')
+    """
     if splitlines:
         return output.splitlines()
     return output
+
 
 def verify_columns_present_in_dataframe(
     *, data, columns: str | list[str], source: str

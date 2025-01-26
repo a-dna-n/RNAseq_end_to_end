@@ -54,8 +54,8 @@ class define_constants:
         default_gene_metadata = "counts_gene_metadata.txt"
         default_merged_counts = "counts_combined.txt"
         default_counts_by_gene_name = "counts_by_gene_name.txt"
-        geo_fetch_author_supp = "get_author_supplementary_files_from_GEO_"
-        geo_fetch_NCBI_counts = "get_NCBI_counts_human_"
+        geo_fetch_author_supp = "get_author_supp_files_from_GEO"
+        geo_fetch_NCBI_counts = "get_NCBI_counts_human"
         """
         rnaspades = SimpleNamespace(
             exe = "${HOME}/bin/SPAdes-3.15.5/bin/rnaspades.py",
@@ -93,6 +93,7 @@ class define_constants:
         )
         """
         species_unalias = {"Homo sapiens" :  "human", "Mus musculus": "mouse"}
+        species_tax_code = {"9606": "human", "10090" :  "mouse"}
         metadata_sources = ["SRA", "GEO", "ENA"]
         file_prefix = SimpleNamespace(pysradb = "pySRAdb", geoparse = "GEOparse",  geo = "GEO",  ena = "ENA")
         self.__dict__.update(**{k: v for (k, v) in locals().items() if not(k.startswith("_")  or k.startswith("self"))})
