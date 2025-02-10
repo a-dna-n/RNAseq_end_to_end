@@ -3618,11 +3618,11 @@ def metadata(args):
 
 if __name__ == "__main__":
 
-    test_geo_find_supplementary_files()
-    test_get_NCBI_counts()
-    test_get_GEO_series_metadata_files()
-    test_get_ENA_fastq_list()
-    sys.exit()
+    #test_geo_find_supplementary_files()
+    #test_get_NCBI_counts()
+    #test_get_GEO_series_metadata_files()
+    #test_get_ENA_fastq_list()
+    #sys.exit()
     constants.star_indexes = find_star_indexes()
     args = define_args(constants)
     args.handle_args()
