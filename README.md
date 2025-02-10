@@ -2,6 +2,10 @@
 
 A suite of tools that starts from an ID (GEO, SRA or ENA) and ends with alignments, expression results and assembled transcripts. Deals with metadata, fastq files, etc.
 
+## Status
+
+Work in progress - converting all argument handling to cyclopts.
+
 ## Motivation
 
 Reproducibility, transparency. ~1,300 RNA-seq samples re-analyzed from scratch on modest equipment. Manuscript in preparation.
