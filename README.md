@@ -2,6 +2,8 @@
 
 A suite of tools that starts from an ID (GEO, SRA or ENA) and ends with alignments, expression results and assembled transcripts. Deals with metadata, fastq files, etc.
 
+Update: now includes modules for copy-number analyses etc.
+
 ## Status
 
 Work in progress - converting all argument handling to cyclopts.
