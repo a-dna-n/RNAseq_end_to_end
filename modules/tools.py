@@ -6,13 +6,14 @@ from typing import TypeAlias, Union #, Literal
 import  shlex
 
 File_or_Dir: TypeAlias = Union[str | bytes | os.PathLike]
+FileName: TypeAlias = Union[str | bytes | os.PathLike]
 
 # cat grep hostname wget which zcat
 # abra2 minimap2 pysradb regtools samtools spades STAR 
 
-def log_message(*args, exit_now: bool = False, **kwargs):
+def log_message(*args, fatal: bool = False, **kwargs):
     print(*args, **kwargs, file=sys.stderr)
-    if exit_now:
+    if fatal:
         sys.exit(1)
 
 def detect_stdin():
@@ -30,8 +31,11 @@ def execute_command(
     *,
     exit_on_error: bool = False,
     splitlines: bool = True,
+    output_command_first: bool = False
 ):
     
+    if output_command_first:
+        log_message(command)
     with subprocess.Popen(shlex.split(command), stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as process:
         output = process.communicate()[0]
     output = output.decode("utf-8") #.rstrip(')
@@ -39,7 +43,7 @@ def execute_command(
     try:
         output = subprocess.check_output(command, shell=True, stderr=subprocess.STDOUT)
     except:
-        log_message(f"Execution failed: {command}", exit_now = exit_on_error)
+        log_message(f"Execution failed: {command}", fatal = exit_on_error)
         return []
     output = output.decode("utf-8") #.rstrip(')
     """
@@ -48,7 +52,7 @@ def execute_command(
     return output
 
 
-def verify_columns_present_in_dataframe(
+def verify_columns_present(
     *, data, columns: str | list[str], source: str
 ):
     # data = DataFrame
@@ -57,9 +61,9 @@ def verify_columns_present_in_dataframe(
     if isinstance(columns, str):
         columns = [columns]
     if missing := set(columns) - set(data.columns):
-        log_message(f"Column(s) missing in {source}:", *missing, sep="\n\t", exit_now=True)
+        log_message(f"Column(s) missing in {source}:", *missing, sep="\n\t", fatal=True)
 
-def verify_columns_absent_in_dataframe(
+def verify_columns_absent(
     *, data, columns: str | list[str], source: str
 ):
     # data = DataFrame
@@ -68,7 +72,7 @@ def verify_columns_absent_in_dataframe(
     if isinstance(columns, str):
         columns = [columns]
     if conflict := set(columns) & set(data.columns):
-        log_message(f"Column(s) found {source}:", *conflict, sep="\n\t", exit_now=True)
+        log_message(f"Column(s) found {source}:", *conflict, sep="\n\t", fatal=True)
 
 def system_memory():
     return int(execute_command("free --mega | grep ^Mem")[0].split(" ")[-1])
@@ -86,7 +90,7 @@ def test_executables(exes: str | list[str], *, exit_on_error: bool = False):
     if isinstance(exes, str):
         exes = [exes]
     if missing := [exe for exe in exes if not execute_command(f"which {exe}", exit_on_error=False)]:
-        log_message("Missing exes:", *missing, sep="\n\t",  exit_now = exit_on_error)
+        log_message("Missing exes:", *missing, sep="\n\t",  fatal = exit_on_error)
 
     #for exe in exes:
     #    execute_command(f"which {exe}", exit_on_error=exit_on_error)
@@ -101,7 +105,7 @@ def test_libraries(libraries : str | list[str], *, exit_on_error: bool = True):
     """
     from importlib.util import find_spec
     if missing := [p for p in libraries if not find_spec(p)]:
-        log_message("Missing libraries:", *missing, sep="\n\t",  exit_now = exit_on_error)
+        log_message("Missing libraries:", *missing, sep="\n\t",  fatal = exit_on_error)
 
 def verify_that_paths_exist(path_or_paths: str | list[str], exit_on_error: bool = True):
     # checks if files and/or folders exist
@@ -112,7 +116,7 @@ def verify_that_paths_exist(path_or_paths: str | list[str], exit_on_error: bool 
         path_list = path_or_paths
     if missing := [x for x in path_list if not os.path.exists(x)]:
         missing = "\n".join(missing)
-        log_message(f"paths not found:\n{missing}", exit_now=exit_on_error)
+        log_message(f"paths not found:\n{missing}", fatal=exit_on_error)
         return False
     return True
 
@@ -126,7 +130,7 @@ def exit_if_files_exist(file_or_files: str | list[str]):
         file_list = file_or_files
     if files_found := [x for x in file_list if os.path.exists(x)]:
         files_found = "\n".join(files_found)
-        log_message(f"output file(s) found:\n{files_found}", exit_now=True)
+        log_message(f"output file(s) found:\n{files_found}", fatal=True)
 
 
 def check_dir_write_access(paths: File_or_Dir | list[File_or_Dir]):
@@ -141,13 +145,13 @@ def check_dir_write_access(paths: File_or_Dir | list[File_or_Dir]):
             if os.access(p, os.W_OK):
                 log_message(f"{p} exists, write access OK")
             else:
-                log_message(f"No write access to {p}", exit_now=True)
+                log_message(f"No write access to {p}", fatal=True)
         else:
             try:
                 os.makedirs(p)
                 log_message(f"{p} created")
             except:
-                log_message(f"Cannot create {p}", exit_now=True)
+                log_message(f"Cannot create {p}", fatal=True)
             
 
 def check_if_dir_is_mounted(directory: File_or_Dir):
@@ -156,12 +160,12 @@ def check_if_dir_is_mounted(directory: File_or_Dir):
         if len(temp) > 1 and temp[1] == "on" and directory.startswith(temp[2]):
             log_message(f"{temp[2]} is mounted")
             return
-    log_message(f"{directory} is not on a mounted drive", exit_now=True)
+    log_message(f"{directory} is not on a mounted drive", fatal=True)
 
 
 def is_a_gene_bam(bamfile: File_or_Dir):
     if ".realigned." in bamfile:
-        log_message(f"Unexpected input: {bamfile} is a realigned BAM", exit_now=True)
+        log_message(f"Unexpected input: {bamfile} is a realigned BAM", fatal=True)
     if ".genes." in bamfile:
         return True
     return False
@@ -172,7 +176,7 @@ def gene_bam(bamfile: File_or_Dir):
     # output = corresponding gene-specific bam
     if is_a_gene_bam(bamfile):
         log_message(
-            f"Unexpected input: {bamfile} is a region-specific BAM file", exit_now=True
+            f"Unexpected input: {bamfile} is a region-specific BAM file", fatal=True
         )
     return re.sub(r"\.bam$", ".genes.bam", bamfile)
 
@@ -183,7 +187,7 @@ def realigned_gene_bam(bamfile: File_or_Dir):
     if is_a_gene_bam(bamfile):
         return re.sub(".genes.bam", ".genes.realigned.bam", bamfile)
     log_message(
-        f"Unexpected input: {bamfile} is not a region-specific BAM file.", exit_now=True
+        f"Unexpected input: {bamfile} is not a region-specific BAM file.", fatal=True
     )
 
 
@@ -205,7 +209,7 @@ def get_read_type_from_a_bamfile(bamfile: File_or_Dir): #, check_if_bamfile_exis
         else:
             return constants.read_type.single
     log_message(
-        f"Invalid output from samtools view {bamfile}:\n{samtools_flag}", exit_now=True
+        f"Invalid output from samtools view {bamfile}:\n{samtools_flag}", fatal=True
     )
 
 def get_species_from_a_bam_file(bamfile: File_or_Dir):
@@ -258,7 +262,7 @@ def get_single_species_for_bamfiles(*, bamfiles: list[File_or_Dir]):  # , check_
     if len(species_for_bams) == 1:
         return species_for_bams[0]
     else:
-        log_message("Invalid number of species for bam files:", *species_for_bams, sep="\n", exit_now=True)
+        log_message("Invalid number of species for bam files:", *species_for_bams, sep="\n", fatal=True)
 
 
 def get_read_type_from_bamfiles(*, bamfiles: list[File_or_Dir],
@@ -283,7 +287,7 @@ def get_read_type_from_bamfiles(*, bamfiles: list[File_or_Dir],
         return read_types[0]
     else:
         temp = " ".join(read_types)
-        log_message(f"Multiple read types : {temp}", exit_now=True)
+        log_message(f"Multiple read types : {temp}", fatal=True)
     """
 
 def make_gene_bam(*, inputbam: File_or_Dir, outputbam: File_or_Dir, regions: File_or_Dir, execute: bool = False):
@@ -294,7 +298,7 @@ def make_gene_bam(*, inputbam: File_or_Dir, outputbam: File_or_Dir, regions: Fil
         execute_command(command=command, log_command=True, exit_on_error=True)
         for x in [outputbam, f"{outputbam}.bai"]:
             if not os.path.exists(x):
-                log_message(f"Status OK but {x} not found", exit_now=True)
+                log_message(f"Status OK but {x} not found", fatal=True)
     else:
         return command
 
@@ -302,36 +306,23 @@ def check_for_file_xor_stdin(inputfile: File_or_Dir | None):
     if inputfile is None:
         if detect_stdin():
             return
-        log_message("Specify an input file or stdin.", exit_now=True)
+        log_message("Specify an input file or stdin.", fatal=True)
     elif detect_stdin():
-        log_message("Specify an input file or stdin, but not both.", exit_now=True)
+        log_message("Specify an input file or stdin, but not both.", fatal=True)
         verify_that_paths_exist(inputfile)
 
+def transpose_nested_list(*, data: list):
+    # M x N list becomes N x M
+    return [list(x) for x in zip(*data)]
 
-def unique_row_headers(data: list[list]):
-    # input list of lists
-    # makes first column IDs unique by adding 1, 2 etc. if repeated
-    # assert isinstance(data, list), "data is not a list"
-    # assert all(isinstance(x, list) for x in data), "data is not a list of lists"
 
-    ctr = Counter([row[0] for row in data])
-    repeat = {x: 1 if y > 1 else 0 for (x, y) in ctr.items()}
-    for i, row in enumerate(data):
-        id = row[0]
-        if repeat[id]:
-            data[i][0] = f"{id}_{repeat[id]}"
-            repeat[id] += 1
-    return data
-    """
-    input:
-        characteristics
-        characteristics
-        characteristics
-
-    output:
-        characteristics_1
-        characteristics_2
-        characteristics_3
-
-    """
+def  test_URL(url):
+    cmd = f"wget -o - --spider {url}"
+    if response := execute_command(cmd):
+        for line in response:
+            if "Remote file exists" in line:
+                return response
+            if line.startswith("File ") and line.endswith(" exists."):
+                return response
+    return False
 

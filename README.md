@@ -12,13 +12,25 @@ Reproducibility, transparency. ~1,300 RNA-seq samples re-analyzed from scratch o
 
 ## Features (partial list)
 
-- With two commands, obtains metatadata from both GEO and ENA with pySRAdb ([repo](https://github.com/saketkc/pysradb)), merges and simplifies them, looks in GEO for supplementary files from study authors and GEO-generated counts for human, and makes a Bash script to get them, obtains and parses the GEO sample matrix, and makes a well-formatted text file that makes it easy to choose samples to process, to know if ENA has fastqs, and what the actual read length is.
-- User edits this file down to two or three columns: an arbitrary sample ID  and the partiial URL to the fastq(s).
-- This simple file and one command lead to a script that runs everything downsream (through file cleanup).
-- The key parameters are the species, read length, max download speed (courtesy to ENA), genes of interest, and optionally network drive destination.
-- Retrieving human or mouse reference genome & transcriptome, generating ancillary files e.g. gene coordinates.
-- Merging featureCounts results for  groups of related samples, generating CPM and FPKM.
-- Running Abra2 and RNAspades for specific regions.
+- With two commands:
+  - obtains metatadata from GEO and ENA with ([pySRAdb](https://github.com/saketkc/pysradb)) and optionally direct requests, merges and simplifies the contents (e.g. dropping uninformative or redundant columns etc.)
+  - looks in GEO for supplementary files posted by study authors, and generates a Bash script to retrieve them;
+  - looks in GEO for NCBI-generated counts for human experiments, and generates a Bash script to retrieve them;
+  - obtains and parses the GEO sample matrix file;
+  - outputs a well-formatted text file that makes it easy to choose samples to process, to know if ENA has fastqs, whether the reads are paired, and what the actual read length is.
+
+- The user edits this file down to two or three columns: an arbitrary sample ID and the partial URL to the fastq(s).
+
+- This simple file and one more command lead to a script that runs everything downstream (through file cleanup): retrieval, alignment, quantification, etc.
+    - The key parameters for this command are the species, read length, max download speed (as a courtesy to ENA), genes of interest, and optionally network drive destination.
+      - Caveat: the quantification steps involve multiple calls to the same script and are not in line with the principle that the entire procedure should be easy to follow. They should be a single Python script.
+
+- Other subfunctions:
+
+- Retrieve human or mouse reference genome & transcriptome, generating ancillary files e.g. gene coordinates.
+- Merge featureCounts results for  groups of related samples, generate CPM and FPKM.
+- Run Abra2 (local realignment) and RNAspades (assembly) for specific (gene) regions right after alignments.
+
 
 ## Bash from Python
 
