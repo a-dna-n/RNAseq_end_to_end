@@ -204,7 +204,7 @@ def get_junctions(args: _junction_args):
         bed_out = junctions_out + ".bed"
         if not args.overwrite:
             exit_if_files_exist([junctions_out, bed_out])
-        execute_command(f"regtools junctions extract {inputfile} -o {junctions_out} -M 25000 -s RF", output_command_first=True)
+        execute_command(f"regtools junctions extract {inputfile} -o {junctions_out} -M 25000 -s RFl", output_command_first=True)
         data = pd.read_csv(junctions_out, sep="\t", header=None)
         data.columns = "chr start stop desc count strand d1 d2 d3 d4 counts d5".split(" ")
         data["strand"] = "+"

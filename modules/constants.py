@@ -20,7 +20,7 @@ class define_constants:
         # rnaseq.py genomeref: error: argument --species/-s: invalid choice: 'mouse' (choose from typing.Unpack[typing.Literal['human', 'mouse']])
 
         cpus = int(execute_command("grep -c ^processor /proc/cpuinfo")[0])
-        known_species = ["human", "mouse"] #, "monkey", "vero"]
+        known_species = ["human", "mouse"] # , "green_monkey"] #, "monkey", "vero"]
         _star_base_dir = "${HOME}/star"
         ref_dir = os.path.join(_star_base_dir, "ref")
         sortmem = 4000 #{"L490": 4000, "t3": 4000, "p43s": 3000}.get(hostname, 0)
@@ -92,8 +92,9 @@ class define_constants:
             }
         )
         """
-        species_unalias = {"Homo sapiens" :  "human", "Mus musculus": "mouse"}
-        species_tax_code = {"9606": "human", "10090" :  "mouse"}
+        species_unalias = {"Homo sapiens" :  "human", "Mus musculus": "mouse"} #, "Chlorocebus sabaeus" : "green_monkey"}
+
+        species_tax_code = {"9606": "human", "10090" :  "mouse"} #, "60711" : "green_monkey"}
         metadata_sources = ["SRA", "GEO", "ENA"]
         file_prefix = SimpleNamespace(pysradb = "pySRAdb", geoparse = "GEOparse",  geo = "GEO",  ena = "ENA")
         self.__dict__.update(**{k: v for (k, v) in locals().items() if not(k.startswith("_")  or k.startswith("self"))})

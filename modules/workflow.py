@@ -14,15 +14,15 @@ from dataclasses import dataclass, KW_ONLY
 from types import SimpleNamespace
 from typing import Literal
 
-cyc_app = cyclopts.App(help = "Utilities to manage workflow, studies, files.")
+cyc_app = cyclopts.App(help = "Utilities to manage workflow, studies, files.", help_format="rich")
 cyc_group = cyclopts.Group.create_ordered("workflow")
 
 """
 
 def register():
     
-    geo = "GSE237287"
-    folder = "Polyak_24"
+    geo = "GSE..."
+    folder = "Pol..._24"
 
     check_dir_write_access(args.outputdir)
 
@@ -109,7 +109,7 @@ class _study_args:
     #parse: bool = True
     #"simplify/reformat the metadata"
 
-@cyc_app.command(group=cyc_group)
+@cyc_app.command(group=cyc_group, help="Make directories for a study.")
 def register(args: _study_args):
     """Make folder structure for a study
     """
@@ -123,7 +123,7 @@ def register(args: _study_args):
     geo_get_authors_files(input = [f"{folder}/metadata"], study = geo, outputdir = f"{folder}/author_files_in_GEO")
     """
 
-@cyc_app.command(group=cyc_group)
+@cyc_app.command(group=cyc_group, help="Convert HTML to Markdown.")
 def html_to_md(*, inputfile: FileName, outputformat: Literal["gfm", "gfm-raw_html", "markdown", "markdown-raw_html"]="markdown-raw_html", outputfile: FileName | None = None):
     verify_that_paths_exist(inputfile)
     if not outputfile:
@@ -135,3 +135,55 @@ def html_to_md(*, inputfile: FileName, outputformat: Literal["gfm", "gfm-raw_htm
 
 if __name__ == "__main__":
     cyc_app()
+
+
+
+'''
+#!/usr/bin/env python
+"""
+convert pmid2doi <pmid>
+convert doi2pmid <doi>
+convert bookid2pmid <ncbi_bookID>
+pubmed_article <pmid>
+"""
+
+
+# modified from https://www.kaggle.com/code/binitagiri/extract-data-from-pubmed-using-python
+import pandas as pd
+import sys, os
+from metapub import PubMedFetcher
+import string
+from collections import Counter
+
+pmid = sys.argv[-1]
+
+fetch = PubMedFetcher()
+
+data = pd.DataFrame()
+keys = "pmid title pmc abstract journal year date authors doi Zotero DOI_URL Pubmed_URL
+pubmed_type url citation ".split()
+
+article = fetch.article_by_pmid(pmid)
+temp = article.to_dict()
+temp["citation"] = article.citation
+temp["authors"] = temp["authors_str"]
+temp["date"] = str(article.history.get("pubmed", "")).split(" ")[0]
+for k in ["abstract", ]:
+    if isinstance(temp[k], list):
+        temp[k] = " ".join(temp[k])
+    temp[k] = temp[k].replace("\n", " ").replace("  ", " ")
+values = [[temp.get(k, "unknown")] for k in keys]
+data = pd.DataFrame(values, index=keys).T #, columns = keys)
+data.to_csv(sys.stdout, sep="\t", index=False)
+
+data["date"] = [x.replace("-","_") for x in data["date"]]
+data["YY"] = data["date"].str[2:4]  #[str(date)[2:4]"_".join(x.split("-")[:2]) for x in data["date"]]
+data["YY_MM"] = [x[2:7] for x in data["date"]]
+data["last_author_edit"] = [authors.split(";")[-1].split(" ")[1].split("-")[0] for authors in data["authors"]]
+data.insert(1, "study_key", "")
+data["study_key"] = [f"{last_author}_{yy}" for (last_author, yy) in zip(data["last_author_edit"], data["YY"])]
+
+data.rename(columns = {"pmid":"Pubmed_ID", "pmc": "PMC_ID"}, inplace=True)
+
+data.to_csv(sys.stdout, sep="\t", index=False)
+'''
