@@ -7,6 +7,10 @@ from modules.tools import *
 
 test_libraries(["cyclopts", "metapub"], exit_on_error = True)
 
+
+#import string
+#from collections import Counter
+
 import re
 import pandas as pd
 import cyclopts
@@ -133,57 +137,43 @@ def html_to_md(*, inputfile: FileName, outputformat: Literal["gfm", "gfm-raw_htm
     execute_command(f"pandoc {inputfile} -o {outputfile} --to {outputformat} --from html --wrap=none") # --extract-media=figures")
 
 
+@cyc_app.command(group=cyc_group, help="Retrieve article metadata.")
+def get_article(*, pmid: str, outputfile: FileName | None = None):
+    from metapub import PubMedFetcher
+    pubmed_api_key = os.getenv("NCBI_API_KEY", default="")
+
+
+    # modified from https://www.kaggle.com/code/binitagiri/extract-data-from-pubmed-using-python
+
+    fetch = PubMedFetcher()
+
+    data = pd.DataFrame()
+    keys = "study_key pmid category notes Genes Species title pmc abstract journal year date authors doi Zotero first_author last_author_edit Pubmed_URL pubmed_type url citation".split()
+
+    article = fetch.article_by_pmid(pmid)
+    temp = article.to_dict()
+    temp["citation"] = article.citation
+    temp["authors"] = temp["authors_str"]
+    temp["date"] = str(article.history.get("pubmed", "")).split(" ")[0]
+    for k in ["abstract", ]:
+        if isinstance(temp[k], list):
+            temp[k] = " ".join(temp[k])
+        temp[k] = temp[k].replace("\n", " ").replace("  ", " ")
+    values = [[temp.get(k, "unknown")] for k in keys]
+    data = pd.DataFrame(values, index=keys).T #, columns = keys)
+    data.to_csv(sys.stdout, sep="\t", index=False)
+
+    data["date"] = [x.replace("-","_") for x in data["date"]]
+    data["YY"] = data["date"].str[2:4]  #[str(date)[2:4]"_".join(x.split("-")[:2]) for x in data["date"]]
+    data["YY_MM"] = [x[2:7] for x in data["date"]]
+    data["last_author_edit"] = [authors.split(";")[-1].split(" ")[1].split("-")[0] for authors in data["authors"]]
+    data["study_key"] = [f"{last_author}_{yy}" for (last_author, yy) in zip(data["last_author_edit"], data["YY"])]
+
+    data.rename(columns = {"pmid":"Pubmed_ID", "pmc": "PMC_ID"}, inplace=True)
+
+    data.to_csv(outputfile if outputfile else sys.stdout, sep="\t", index=False)
+
+
 if __name__ == "__main__":
     cyc_app()
 
-
-
-'''
-#!/usr/bin/env python
-"""
-convert pmid2doi <pmid>
-convert doi2pmid <doi>
-convert bookid2pmid <ncbi_bookID>
-pubmed_article <pmid>
-"""
-
-
-# modified from https://www.kaggle.com/code/binitagiri/extract-data-from-pubmed-using-python
-import pandas as pd
-import sys, os
-from metapub import PubMedFetcher
-import string
-from collections import Counter
-
-pmid = sys.argv[-1]
-
-fetch = PubMedFetcher()
-
-data = pd.DataFrame()
-keys = "pmid title pmc abstract journal year date authors doi Zotero DOI_URL Pubmed_URL
-pubmed_type url citation ".split()
-
-article = fetch.article_by_pmid(pmid)
-temp = article.to_dict()
-temp["citation"] = article.citation
-temp["authors"] = temp["authors_str"]
-temp["date"] = str(article.history.get("pubmed", "")).split(" ")[0]
-for k in ["abstract", ]:
-    if isinstance(temp[k], list):
-        temp[k] = " ".join(temp[k])
-    temp[k] = temp[k].replace("\n", " ").replace("  ", " ")
-values = [[temp.get(k, "unknown")] for k in keys]
-data = pd.DataFrame(values, index=keys).T #, columns = keys)
-data.to_csv(sys.stdout, sep="\t", index=False)
-
-data["date"] = [x.replace("-","_") for x in data["date"]]
-data["YY"] = data["date"].str[2:4]  #[str(date)[2:4]"_".join(x.split("-")[:2]) for x in data["date"]]
-data["YY_MM"] = [x[2:7] for x in data["date"]]
-data["last_author_edit"] = [authors.split(";")[-1].split(" ")[1].split("-")[0] for authors in data["authors"]]
-data.insert(1, "study_key", "")
-data["study_key"] = [f"{last_author}_{yy}" for (last_author, yy) in zip(data["last_author_edit"], data["YY"])]
-
-data.rename(columns = {"pmid":"Pubmed_ID", "pmc": "PMC_ID"}, inplace=True)
-
-data.to_csv(sys.stdout, sep="\t", index=False)
-'''
