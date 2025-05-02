@@ -5,8 +5,6 @@ Functions to retrieve RNA-seq data and metadata, launch alignments, counts, reas
 
 GEOparse and pySRAdb have excellent features, but neither knows about NCBI human recounts, and neither lets us choose which supplementary files to download depending on their contents. GEOparse only uses soft-formatted files, which are problematic in studies with human and mouse samples.
 
-GSE154783: SRP272683
-GSE228268: SRP429497  = c. sabaeus
 """
 import sys
 import os
