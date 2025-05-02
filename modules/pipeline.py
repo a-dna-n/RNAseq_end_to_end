@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 
-# caution - only partially migrated to cyclopts
-
-# work in progress
+# CAUTION - work in progress - arg handling is only partially migrated to cyclopts
 
 import sys
 import os
@@ -19,25 +17,95 @@ import re
 import pandas as pd
 import cyclopts
 from dataclasses import dataclass, KW_ONLY
+from typing import Literal
 
 constants = define_constants()
 
 cyc_app = cyclopts.App(help = "Functions for RNA-seq analyses from scratch.")
-cyc_group = cyclopts.Group.create_ordered("pipeline")
+cyc_group_align = cyclopts.Group.create_ordered("pipeline")
+cyc_group_refs = cyclopts.Group.create_ordered("Preprocessing.")
+
+
+@cyc_app.command(group=cyc_group_refs)
+def genomeref(args):
+    if args.script:
+        if "{species}" in args.script:
+            args.script = args.script.replace("{species}", args.species)
+        if not args.overwrite:
+            exit_if_files_exist(args.script)
+    dna = constants.ref.dna[args.species]
+    rna = constants.ref.rna[args.species]
+    output = []
+    output.append(bash_header())
+    output.append(dedent(f"""
+        destdir={args.outputdir}
+        dna={dna}
+        rna={rna}
+        wget --no-clobber -P $destdir $dna
+        wget --no-clobber -P $destdir $rna
+    """))
+    if args.script:
+        with open(args.script, "w") as tempout:
+            print(*output, sep="\n", file=tempout)
+        os.chmod(args.script, 0o755)
+        log_message(f"created {args.script}")
+    else:
+        print(*output, sep="\n")
+
+
+@cyc_app.command(group=cyc_group_refs)
+def check_if_ref_files_match(*, dna: File_or_Dir, rna: File_or_Dir, species: constants.known_species):
+
+    """
+    Input = paired URLs
+    https://ftp.ensembl.org/pub/release-109/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
+    https://ftp.ensembl.org/pub/release-109/gtf/homo_sapiens/Homo_sapiens.GRCh38.109.gtf.gz
+
+    https://ftp.ensembl.org/pub/release-109/fasta/mus_musculus/dna/Mus_musculus.GRCm39.dna.primary_assembly.fa.gz
+    https://ftp.ensembl.org/pub/release-109/gtf/mus_musculus/Mus_musculus.GRCm39.109.gtf.gz
+    """
+
+    species_Latin = {"human" : "sapiens", "mouse": "musculus"}.get(species)
+    if species_Latin in dna and species_Latin in rna:
+        log_message(f"DNA and RNA files for {species} both contain {species_Latin}")
+    else:
+        log_message(f"Mismatch in DNA and RNA files for {species} aka {species_Latin}:\nDNA: {dna}\nRNA{rna}", fatal=True)
+
+    dna_build = os.path.basename(dna).split(".")[1]
+    dna_build_from_rna_file, rna_build = os.path.basename(rna).split(".")[1:3]
+
+    if dna_build == dna_build_from_rna_file:
+        log_message(f"DNA and RNA files are both for genome build {dna_build}")
+    else:
+        log_message(f"Genome builds mismatched {dna_build} vs. {dna_build_from_rna_file}:\nDNA: {dna}\nRNA{rna}", fatal=True)
+    
+    ens = []
+    for f in [dna, rna]:
+        if m := re.search(r'release-(\d+)\/', f):
+            ens.append(m.groups()[0])
+        else:
+            log_message(f"Release not found in {f}", fatal=True)
+    if len(set(ens)) != 1:
+        log_message(f"Ensembl releases mismatched {ens[0]} vs. {ens[1]}:\nDNA: {dna}\nRNA{rna}", fatal=True)
+    ens = ens[0]
+    return dna_build, ens
+    
 
 
 
 
-@cyc_app.command(group=cyc_group)
+@cyc_app.command(group=cyc_group_align)
 def bam_species(*, bamfiles: list[FileName], outputfile: FileName | None = None):
-    if args.OUTPUTFILE:
-        exit_if_files_exist(args.OUTPUTFILE)
-    verify_that_paths_exist(args.BAMFILES)
-    species = get_species_for_bamfiles(bamfiles=args.BAMFILES)
-    with open(args.OUTPUTFILE, "w") if args.OUTPUTFILE else sys.stdout as tempout:
-        for bam in args.BAMFILES:
+    if outputfile:
+        exit_if_files_exist(outputfile)
+    verify_that_paths_exist(bamfiles)
+    species = get_species_for_bamfiles(bamfiles=bamfiles)
+    with open(outputfile, "w") if outputfile else sys.stdout as tempout:
+        for bam in bamfiles:
             print(f"{bam}\t{species[bam]}", file=tempout)
 
+#check-if-ref-files-match
+@cyc_app.command(group=cyc_group_align)
 def bash_header(*, flags: str = "set -e"):
     return dedent(f"""
         #!/bin/bash
@@ -47,27 +115,51 @@ def bash_header(*, flags: str = "set -e"):
     """).lstrip()
 
 
+@dataclass
+class get_genecoords:
+    genes: list[str]
+    "Gene(s) in a file or as a space-separated list"
+
+    species: Literal[constants.known_species]
+    "On the origin of reads."
+
+    extend: int = 0
+    "Extension of gene boundaries, in nucleotides. Maximum not checked against chromosome length."
+
+    outputfile: File_or_Dir = "gene_coords_{species}_ext_{extend}.bed"
+    "Output file for gene coordinates. Use double quotes for stdout."
+
+    overwrite: bool = False
+    "Overwrite the output file if it's already present."
+
+    script: str | None = None
+    'Output command to this Bash script instead of executing.'
+
+@cyc_app.command(group=cyc_group_refs)
 def get_genecoords(args):
-    #if args.SCRIPT and args.OUTPUTFILE:
-    #    log_message("Specify either --script or --outputfile but not both.", exit_now=True)
-    outputfile = args.OUTPUTFILE
-    outputfile = outputfile.replace("{species}", args.SPECIES)
-    outputfile = outputfile.replace("{extend}", str(args.EXTEND))
-    if not args.OVERWRITE:
+    """Get coordinates for a list of genes, in BED format, or output the script to do this."""
+
+
+    #if args.script and args.outputfile:
+    #    log_message("Specify either --script or --outputfile but not both.", fatal=True)
+    outputfile = args.outputfile
+    outputfile = outputfile.replace("{species}", args.species)
+    outputfile = outputfile.replace("{extend}", str(args.extend))
+    if not args.overwrite:
         if outputfile:
             exit_if_files_exist(outputfile)
-        if args.SCRIPT:
-            exit_if_files_exist(args.SCRIPT)
-    species = args.SPECIES
+        if args.script:
+            exit_if_files_exist(args.script)
+    species = args.species
     coords_file = os.path.expandvars(constants.coords_source_file[species])
     verify_that_paths_exist(coords_file)
-    genes_to_get = return_list_from_file_or_list(args.GENES)
-    if args.SCRIPT:
+    genes_to_get = return_list_from_file_or_list(args.genes)
+    if args.script:
         genes = " ".join(genes_to_get)
         output = f"""
             #!/bin/bash
             set -e
-            ext={args.EXTEND}
+            ext={args.extend}
             genes={genes}
             species={species}
             {__file__} get_genecoords -g $genes -s $species -x $ext -o {outputfile}
@@ -76,7 +168,7 @@ def get_genecoords(args):
         with open(script, "w") as tempout:
             print(output, file=tempout)
         os.chmod(script, 0o755)
-        log_message(f"created {args.SCRIPT}")
+        log_message(f"created {args.script}")
     else:
         lowercase = set(x.lower() for x in genes_to_get)
 
@@ -84,7 +176,7 @@ def get_genecoords(args):
         data = pd.read_csv(coords_file, sep="\t", header=0)
         if " ".join(data.columns[0:4]) != "chr start stop gene_name":
             log_message(
-                f"Unexpected file contents in  {coords_file}", exit_now=True
+                f"Unexpected file contents in  {coords_file}", fatal=True
             )
         data["dummy"] = data["gene_name"].str.lower()
         mask = data["dummy"].isin(lowercase)
@@ -97,12 +189,12 @@ def get_genecoords(args):
         data.drop(columns=["dummy"], inplace=True)
         data["start"] = data["start"].astype(int)
         data["stop"] = data["stop"].astype(int)
-        if args.EXTEND:
-            data["start"] -= args.EXTEND
+        if args.extend:
+            data["start"] -= args.extend
             data["start"] = [
                 max(1, x) for x in data["start"]
             ]  # data.apply(lambda x: max(x["start"], 1), axis=1)
-            data["stop"] += args.EXTEND
+            data["stop"] += args.extend
             log_message("Caution: stop position may exceed chromosome length")
         data.sort_values(by=["chr", "start"]).to_csv(
             outputfile or sys.stdout, sep="\t", header=False, index=False
@@ -139,7 +231,7 @@ To get all non-supplementary/secondary reads in a single file, redirect the outp
    samtools fastq in.bam > all_reads.fq
 """
 
-r'''
+@cyc_app.command(group=cyc_group_align)
 def rnaspades(args):
 
     # construct commands to:
@@ -147,16 +239,16 @@ def rnaspades(args):
     # 2. extract all paired reads from extended gene-specific BAM, discarding singletons (from ends)
     # 3. run rnaspades
     # Only one fastq file is generated for each sample, but it matters for rnaspades whether the reads are single- or paired-end.
-    outputscript = args.SCRIPT
+    outputscript = args.script
     if outputscript:
         exit_if_files_exist(outputscript)
     test_executables(constants.rnaspades.exe)
 
-    genebamfiles = args.GENEBAMFILES or []
+    genebamfiles = args.genebamfiles or []
     genebamfiles = [x for x in genebamfiles if is_a_gene_bam(x)]
-    bamfiles = args.BAMFILES or []
+    bamfiles = args.bamfiles or []
     bamfiles = [x for x in bamfiles if not is_a_gene_bam(x)]
-    regions_file = args.REGIONS or ""
+    regions_file = args.regions or ""
 
     if bamfiles and genebamfiles:
         genebam = {x: gene_bam(x) for x in bamfiles}
@@ -164,7 +256,7 @@ def rnaspades(args):
             log_message("Standard and gene BAM files match")
         else:
             log_message(
-                "Problem - standard and gene BAM files specified but mismatched", exit_now=True
+                "Problem - standard and gene BAM files specified but mismatched", fatal=True
             )
         verify_that_paths_exist(bamfiles + genebamfiles)
     else:
@@ -177,7 +269,7 @@ def rnaspades(args):
             # need to create gene bams
             if not regions_file:
                 log_message(
-                    "Specify gene bams or region file to create them", exit_now=True
+                    "Specify gene bams or region file to create them", fatal=True
                 )
             verify_that_paths_exist(regions_file)
             exit_if_files_exist(genebamfiles)
@@ -189,7 +281,7 @@ def rnaspades(args):
     outputdir_by_sample = {
         x: os.path.realpath(re.sub(r"\.bam$", "", x)) for x in bamfiles
     }
-    for d in outputdir_by_sample.values(): check_dir_write_access(d)
+    for d in outputdir_by_sample.values(): check_dir_write_acycess(d)
 
     read_type = {x: get_read_type_from_a_bamfile(bamfile=x) for x in bamfiles}
     fastq_files = {}
@@ -202,8 +294,8 @@ def rnaspades(args):
         else:
             fastq_file[bam] = f"{prefix}.fq"
             exit_if_files_exist(fastq_file[bam])
-    cpus = args.CPUS
-    mem = args.MEM
+    cpus = args.cpus
+    mem = args.mem
 
     output = []
     """
@@ -332,7 +424,7 @@ def rnaspades(args):
                 {outputdir}/pipeline_state {outputdir}/tmp
             nice gzip -q {outputdir}/*fasta &
         """))
-        if args.ZIPBAMS:
+        if args.zipbams:
             output.append(dedent(f"""
                 # zip gene BAM files
                 zip -qymT -u {constants.gene_bams_zipfile} {genebam[bam]} {genebam[bam]}.bai 2> /dev/null"
@@ -354,7 +446,7 @@ def rnaspades(args):
         commands=output,
         outputfile=outputscript,
         single_line_command=cmd,
-        execute =args.EXEC,
+        execute =args.exec,
     )
 '''
 
@@ -398,17 +490,17 @@ def handle_commands_and_output(*,
 
 def genebams(args):
     # test_executables(exes="samtools"])
-    bamfiles = [x for x in args.BAMFILES if is_a_gene_bam(x) == False]
+    bamfiles = [x for x in args.bamfiles if is_a_gene_bam(x) == False]
     verify_that_paths_exist(bamfiles + [f"{bam}.bai" for bam in bamfiles])
-    outputscript = args.SCRIPT
+    outputscript = args.script
     if outputscript:
         exit_if_files_exist(outputscript)
-    regions_file = args.REGIONS
+    regions_file = args.regions
     verify_that_paths_exist(regions_file)
     outputbam = {x: gene_bam(x) for x in bamfiles}
     exit_if_files_exist(list(outputbam.values()))
     output = []
-    if args.EXEC:
+    if args.exec:
         for bamin, bamout in outputbam.items():
             make_gene_bam(
                 inputbam=bamin, outputbam=bamout, regions=regions_file, execute =True
@@ -421,7 +513,7 @@ def genebams(args):
                 )
             )
 
-    if args.ZIPBAMS:
+    if args.zipbams:
         zipcommands = [
             f"zip -qymT -u {constants.gene_bams_zipfile} {bam} {bam}.bai"
             for bam in outputbam.keys()
@@ -437,29 +529,28 @@ def genebams(args):
             commands=output,
             outputfile=outputscript,
             single_line_command=cmd,
-            execute =args.EXEC,
+            execute =args.exec,
         )
     # else:
-    #    log_message("Error - nothing to do", exit_now=True)
+    #    log_message("Error - nothing to do", fatal=True)
 
 
 def junctions(args):
     pass
-    r'''
     from tempfile import mkstemp
 
     # needs coords and either gene bams or non-gene BAMs, but not both
     test_executables("regtools")
-    outputfileext = args.EXT
-    bamfiles = args.BAMFILES
+    outputfileext = args.ext
+    bamfiles = args.bamfiles
     verify_that_paths_exist(bamfiles)
     outputfile = {bamfile: f"{bamfile}.{outputfileext}" for bamfile in bamfiles}
     # outputfileprefix = {x: re.sub('\.bam$', f".realigned", x) for x in genebamfiles}
     exit_if_files_exist(outputfile.values())
-    mincount = args.MINCOUNT
+    mincount = args.mincount
     if len(set(outputfile.values())) != len(set(outputfile.keys())):
-        log_message("Redundant output file(s)", exit_now=True)
-    regions = args.REGIONS
+        log_message("Redundant output file(s)", fatal=True)
+    regions = args.regions
     if regions:
         verify_that_paths_exist(regions)
         regiondata = pd.read_csv(regions, sep="\t", header=None)
@@ -502,17 +593,17 @@ def junctions(args):
 def abra2(args):
     # needs coords and either gene bams or non-gene BAMs, but not both
     test_executables("abra2")
-    genebamfiles = args.GENEBAMFILES or []
+    genebamfiles = args.genebamfiles or []
     genebamfiles = [x for x in genebamfiles if is_a_gene_bam(x)]
-    bamfiles = args.BAMFILES or []
+    bamfiles = args.bamfiles or []
     bamfiles = [x for x in bamfiles if not is_a_gene_bam(x)]
 
-    outputscript = args.SCRIPT or ""
+    outputscript = args.script or ""
     if outputscript:
         exit_if_files_exist(outputscript)
-    regions_file = args.REGIONS
+    regions_file = args.regions
     verify_that_paths_exist(regions_file)
-    cpus = args.CPUS - 1
+    cpus = args.cpus - 1
     if bamfiles:
         genebam_for_bam = {x: gene_bam(x) for x in bamfiles}
         if genebamfiles:
@@ -521,7 +612,7 @@ def abra2(args):
                 bamfiles = []
             else:
                 log_message(
-                    "Problem - bams & gene bams specified but mismatched", exit_now=True
+                    "Problem - bams & gene bams specified but mismatched", fatal=True
                 )
     if bamfiles:
         # make gene bams
@@ -533,17 +624,17 @@ def abra2(args):
                 inputbam=bamin, outputbam=bamout, regions=regions_file, execute =True
             )
     if not genebamfiles:
-        log_message("No input BAM or gene BAM file(s)", exit_now=True)
+        log_message("No input BAM or gene BAM file(s)", fatal=True)
     verify_that_paths_exist(genebamfiles)
     outputbam = {x: realigned_gene_bam(x) for x in genebamfiles}
     exit_if_files_exist(list(outputbam.values()))
-    species = args.SPECIES or get_single_species_for_bamfiles(bamfiles=genebamfiles)
-    read_type = args.READS or get_single_read_type_for_bamfiles(bamfiles=genebamfiles)
+    species = args.species or get_single_species_for_bamfiles(bamfiles=genebamfiles)
+    read_type = args.reads or get_single_read_type_for_bamfiles(bamfiles=genebamfiles)
     command = f"abra2 --nosort --threads {cpus} --undup"
     if read_type == constants.read_type.single:
         command += " --single"
     elif read_type != constants.read_type.paired:
-        log_message(f"Invalid read type {read_type}", exit_now=True)
+        log_message(f"Invalid read type {read_type}", fatal=True)
     regiondata = pd.read_csv(regions_file, sep="\t", header=None, dtype=object)
     chr_column = regiondata.columns[0]
     chrs = sorted(set(regiondata[chr_column]))
@@ -563,14 +654,14 @@ def abra2(args):
             else:
                 files_not_found.append(ref_file)
     if errors := "\n".join(files_not_found):
-        log_message(f"ref files not found:\n{errors}", exit_now=True)
+        log_message(f"ref files not found:\n{errors}", fatal=True)
 
     outputfileprefix = {x: re.sub(r"\.bam$", f".realigned", x) for x in genebamfiles}
     temp_region_file_by_chr = {chr: f"{regions_file}.temp.{chr}" for chr in chrs}
     if len(set(temp_region_file_by_chr.values())) != len(
         set(temp_region_file_by_chr.keys())
     ):
-        log_message(f"length mismatch {str(temp_region_file_by_chr)}", exit_now=True)
+        log_message(f"length mismatch {str(temp_region_file_by_chr)}", fatal=True)
 
     inputlist = ",".join(genebamfiles)
     for chr, tempdata in regiondata.groupby(chr_column):
@@ -601,7 +692,7 @@ def abra2(args):
         )
         output.append(f"rm {prefix}.temp.*.bam")
         output.append(f"samtools index {newbam}")
-        if args.ZIPBAMS:
+        if args.zipbams:
             output.append(
                 f"zip -qymT -u {constants.gene_bams_zipfile} {inputbam} {inputbam}.bai 2> /dev/null"
             )
@@ -620,7 +711,7 @@ def abra2(args):
         commands=output,
         outputfile=outputscript,
         single_line_command=cmd,
-        execute =args.EXEC,
+        execute =args.exec,
     )
 
 def return_list_from_file_or_list(genes: list[str]):
@@ -640,7 +731,7 @@ def return_dict_from_file_or_list(args=None, arglabel=None):
         # log_message(f"Obtaining {arglabel} from {file}")
         temp = pd.read_csv(file, sep="\t", header=None, dtype=object)
         if len(temp.columns) < 2:
-            log_message(f"Fewer than two columns found in {file}", exit_now=True)
+            log_message(f"Fewer than two columns found in {file}", fatal=True)
         return (
             temp[temp.columns[0:2]].set_index(temp.columns[0]).T.to_dict("records")[0]
         )
@@ -650,15 +741,15 @@ def return_dict_from_file_or_list(args=None, arglabel=None):
     for pair in argvalues:
         temp = pair.split(":")
         if len(temp) != 2:
-            log_message(f"Malformed from:to pair {pair}", exit_now=True)
+            log_message(f"Malformed from:to pair {pair}", fatal=True)
         rename[temp[0]] = temp[1]
     return rename
 
 
-def find_gtf(species=None):
+def find_gtf(*, species : str):
     gtf = constants.gtf.get(species, "")
     if not gtf:
-        log_message(f"Undefined default gtf for {species}", exit_now=True)
+        log_message(f"Undefined default gtf for {species}", fatal=True)
     if os.path.exists(gtf):
         return gtf
     if os.path.exists(f"{gtf}.gz"):
@@ -666,19 +757,19 @@ def find_gtf(species=None):
             zcat {gtf}.gz > {gtf}
                or
             gunzip {gtf}
-        """, exit_now=True)
-    log_message(f"{gtf} not found for {species}", exit_now=True)
+        """, fatal=True)
+    log_message(f"{gtf} not found for {species}", fatal=True)
 
 
 def featureCounts(args):
     # expects all BAM files to be from the same species
-    outputscript = args.SCRIPT
+    outputscript = args.script
     if outputscript:
         exit_if_files_exist(outputscript)
-    bamfiles = args.BAMFILES
+    bamfiles = args.bamfiles
     verify_that_paths_exist(bamfiles)
 
-    sort_by_read_ID = args.SORT_BY_READ_ID == "yes"
+    sort_by_read_ID = args.sort_BY_READ_ID == "yes"
     if sort_by_read_ID:
         unsortedbam = {bam: re.sub(r"\.bam$", ".unsorted.bam", bam) for bam in bamfiles}
         # already_sorted = [bam for bam in bamfiles if os.path.exists(unsortedbam[bam])]
@@ -688,15 +779,15 @@ def featureCounts(args):
     else:
         outputfile = {bam: re.sub(r"\.bam$", ".counts.txt", bam) for bam in bamfiles}
     exit_if_files_exist(outputfile.values())
-    species = args.SPECIES or get_single_species_for_bamfiles(bamfiles=bamfiles)
+    species = args.species or get_single_species_for_bamfiles(bamfiles=bamfiles)
 
-    # constants.sortcpus = floor(args.CPUS / 2)
+    # constants.sortcpus = floor(args.cpus / 2)
 
     
     # log_message(f"constants.sortcpus: {constants.sortcpus}\nconstants.sortmem: {constants.sortmem}")
-    if (args.SORT_CPUS + 1) * args.SORTMEM > system_memory():
+    if (args.sort_CPUS + 1) * args.sortmem > system_memory():
         log_message(
-            f"{args.SORT_CPUS +1} CPUs x {args.SORTMEM}M > {system_memory()}", exit_now=True
+            f"{args.sort_CPUS +1} CPUs x {args.sortmem}M > {system_memory()}", fatal=True
         )
     ref_file = find_gtf(species=species)
 
@@ -712,8 +803,8 @@ def featureCounts(args):
             # works keep
             tempbam = unsortedbam[bam]
             output.append(dedent(f"""
-                samtools view -F 0x4 --bam {bam} 2> {out}.unsort.1.err | samtools sort -n -@ {args.SORT_CPUS} -m {args.SORTMEM}M -l 9 -o {tempbam} 2> {out}.unsort.2.err
-                featureCounts {constants.featurecounts.options} -a {gtf} -o {out} -T {args.CPUS} {tempbam} 2> {out}.log
+                samtools view -F 0x4 --bam {bam} 2> {out}.unsort.1.err | samtools sort -n -@ {args.sort_CPUS} -m {args.sortmem}M -l 9 -o {tempbam} 2> {out}.unsort.2.err
+                featureCounts {constants.featurecounts.options} -a {gtf} -o {out} -T {args.cpus} {tempbam} 2> {out}.log
             """)).lstrip()
             if outputscript:
                 output.append(f"rm {tempbam}")
@@ -732,28 +823,28 @@ def featureCounts(args):
         commands=output,
         outputfile=outputscript,
         single_line_command=cmd,
-        execute =args.EXEC,
+        execute =args.exec,
     )
 
 
 def unsort(args):
-    outputscript = args.SCRIPT
+    outputscript = args.script
     if outputscript:
         exit_if_files_exist(outputscript)
-    bamfiles = args.BAMFILES
+    bamfiles = args.bamfiles
     verify_that_paths_exist(bamfiles)
     outputfile = {bam: re.sub(r"\.bam$", ".unsorted.bam", bam) for bam in bamfiles}
     exit_if_files_exist(outputfile.values())
 
-    sortcpus = args.SORT_CPUS
-    sortmem = args.SORTMEM
+    sortcpus = args.sort_CPUS
+    sortmem = args.sortmem
     log_message(
         f"sortcpus: {sortcpus}\nsortmem: {sortmem}"
     )
     if (sortcpus + 1) * sortmem > system_memory():
         log_message(
             f"{sortcpus +1} CPUs x {sortmem}M > {system_memory()}",
-            exit_now=True,
+            fatal=True,
         )
     output = []
     output.append(bash_header())
@@ -769,7 +860,7 @@ def unsort(args):
         commands=output,
         outputfile=outputscript,
         single_line_command=cmd,
-        execute =args.EXEC,
+        execute =args.exec,
     )
 
 
@@ -778,13 +869,13 @@ def unique_gene_metadata(x):
 
 def gene_metadata(args):
     log_message("output gene metadata")
-    # inputfile = args.INPUTFILES[0]
-    verify_that_paths_exist(args.INPUTFILE)
-    outputfile = args.OUTPUTFILE
+    # inputfile = args.inputfiles[0]
+    verify_that_paths_exist(args.inputfile)
+    outputfile = args.outputfile
     if outputfile:
         if (b := os.path.basename(outputfile)) != outputfile:
-            log_message(f"outputfile {outputfile} != basename {b}", exit_now=True)
-        outputdir = args.OUTPUTDIR.rstrip("/")
+            log_message(f"outputfile {outputfile} != basename {b}", fatal=True)
+        outputdir = args.outputdir.rstrip("/")
         outputfile = os.path.join(outputdir, outputfile)
         exit_if_files_exist(outputfile)
     # output gene metadata from featurecounts
@@ -806,31 +897,6 @@ def gene_metadata(args):
         log_message(f"Gene metadata written to {output}")
     else:
         return data
-
-def genomeref(args):
-    if args.SCRIPT:
-        if "{species}" in args.SCRIPT:
-            args.SCRIPT = args.SCRIPT.replace("{species}", args.SPECIES)
-        if not args.OVERWRITE:
-            exit_if_files_exist(args.SCRIPT)
-    dna = constants.ref.dna[args.SPECIES]
-    rna = constants.ref.rna[args.SPECIES]
-    output = []
-    output.append(bash_header())
-    output.append(dedent(f"""
-        destdir={args.OUTPUTDIR}
-        dna={dna}
-        rna={rna}
-        wget --no-clobber -P $destdir $dna
-        wget --no-clobber -P $destdir $rna
-    """))
-    if args.SCRIPT:
-        with open(args.SCRIPT, "w") as tempout:
-            print(*output, sep="\n", file=tempout)
-        os.chmod(args.SCRIPT, 0o755)
-        log_message(f"created {args.SCRIPT}")
-    else:
-        print(*output, sep="\n")
 
 """
 input if source is aspera (tabs only, header optional and arbitrary)
@@ -963,9 +1029,9 @@ def parse_fastq_manifest(
     verify_that_paths_exist(inputfile)
     data = pd.read_csv(inputfile, sep="\t", header=None, dtype=object, nrows=1)
     if len(data.columns) < 2:
-        log_message(f"Insufficient columns in {inputfile}", exit_now=True)
+        log_message(f"Insufficient columns in {inputfile}", fatal=True)
     if len(data.columns) > 3:
-        log_message(f"Too many columns found in {inputfile}", exit_now=True)
+        log_message(f"Too many columns found in {inputfile}", fatal=True)
     if ".fastq" in data[data.columns[1]][0] or data[data.columns[1]][0].startswith(
         "SRR"
     ):
@@ -977,7 +1043,6 @@ def parse_fastq_manifest(
             log_message(f"Header row found in {inputfile}:", *temp, sep="\n\t")
     data = pd.read_csv(inputfile, sep="\t", header=header, dtype=object)
     errors = False
-    label = data.columns[0]
     label = data.columns[0]
     samples = data[label].unique().tolist()
 
@@ -997,7 +1062,7 @@ def parse_fastq_manifest(
     elif len(fastq_columns) == 2:
         read_type = constants.read_type.paired
     else:
-        log_message("Invalid number of columns", exit_now=True)
+        log_message("Invalid number of columns", fatal=True)
     log_message(f"{read_type} reads")
     if fastq_source == "ENA":
         for col in fastq_columns:
@@ -1059,7 +1124,7 @@ def parse_fastq_manifest(
                 log_message(f"invalid 2 fastq files for {read_type} reads:\n{temp}")
                 errors = True
     if errors:
-        log_message("Errors found in fastq file manifest", exit_now=True)
+        log_message("Errors found in fastq file manifest", fatal=True)
 
     star_fastq_files = {x: "" for x in samples}
     fastq_fetch_params = {x: "" for x in samples}
@@ -1094,58 +1159,23 @@ def parse_fastq_manifest(
         star_fastq_files[sample] = star_fastq_files[sample].rstrip()
     return samples, fastq_fetch_params, star_fastq_files, read_type
 
-def check_if_ref_files_match(*, dna: File_or_Dir, rna: File_or_Dir, species: constants.known_species):
 
-    """
-    Input = paired URLs
-    https://ftp.ensembl.org/pub/release-109/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz
-    https://ftp.ensembl.org/pub/release-109/gtf/homo_sapiens/Homo_sapiens.GRCh38.109.gtf.gz
-
-    https://ftp.ensembl.org/pub/release-109/fasta/mus_musculus/dna/Mus_musculus.GRCm39.dna.primary_assembly.fa.gz
-    https://ftp.ensembl.org/pub/release-109/gtf/mus_musculus/Mus_musculus.GRCm39.109.gtf.gz
-    """
-
-    species_Latin = {"human" : "sapiens", "mouse": "musculus"}.get(species)
-    if species_Latin in dna and species_Latin in rna:
-        log_message(f"DNA and RNA files for {species} both contain {species_Latin}")
-    else:
-        log_message(f"Mismatch in DNA and RNA files for {species} aka {species_Latin}:\nDNA: {dna}\nRNA{rna}", exit_now=True)
-
-    dna_build = os.path.basename(dna).split(".")[1]
-    dna_build_from_rna_file, rna_build = os.path.basename(rna).split(".")[1:3]
-
-    if dna_build == dna_build_from_rna_file:
-        log_message(f"DNA and RNA files are both for genome build {dna_build}")
-    else:
-        log_message(f"Genome builds mismatched {dna_build} vs. {dna_build_from_rna_file}:\nDNA: {dna}\nRNA{rna}", exit_now=True)
-    
-    ens = []
-    for f in [dna, rna]:
-        if m := re.search(r'release-(\d+)\/', f):
-            ens.append(m.groups()[0])
-        else:
-            log_message(f"Release not found in {f}", exit_now=True)
-    if len(set(ens)) != 1:
-        log_message(f"Ensembl releases mismatched {ens[0]} vs. {ens[1]}:\nDNA: {dna}\nRNA{rna}", exit_now=True)
-    ens = ens[0]
-    return dna_build, ens
-    
-
+@cyc_app.command(group=cyc_group_refs)
 def star_make_idx(args):
     # Output command to make an index for a given species and read length.
-    if args.SCRIPT:
-        args.SCRIPT = args.SCRIPT.replace("{species}", args.SPECIES)
-        args.SCRIPT = args.SCRIPT.replace("{readlength}", str(args.READLENGTH))
-        if not args.OVERWRITE:
-            exit_if_files_exist(args.SCRIPT)
-    index = args.INDEX
-    index = index.replace("{species}", args.SPECIES)
-    index = index.replace("{readlength}", str(args.READLENGTH))
+    if args.script:
+        args.script = args.script.replace("{species}", args.species)
+        args.script = args.script.replace("{readlength}", str(args.readlength))
+        if not args.overwrite:
+            exit_if_files_exist(args.script)
+    index = args.index
+    index = index.replace("{species}", args.species)
+    index = index.replace("{readlength}", str(args.readlength))
 
-    dna = constants.ref.dna[args.SPECIES]
-    rna = constants.ref.rna[args.SPECIES]
+    dna = constants.ref.dna[args.species]
+    rna = constants.ref.rna[args.species]
     print(f"dna={dna}, rna={rna}, species={species}")
-    dna_build, rna_build = check_if_ref_files_match(dna=dna, rna=rna, species=args.SPECIES)
+    dna_build, rna_build = check_if_ref_files_match(dna=dna, rna=rna, species=args.species)
     #"human": "https://ftp.ensembl.org/pub/release-109/gtf/homo_sapiens/Homo_sapiens.GRCh38.109.gtf.gz",
     #"mouse": "https://ftp.ensembl.org/pub/release-109/gtf/mus_musculus/Mus_musculus.GRCm39.109.gtf.gz"
     dna = os.path.basename(dna).replace(".gz","")
@@ -1154,11 +1184,11 @@ def star_make_idx(args):
     index = index.replace("{rna_build}", rna_build)
 
 
-    cpus = args.CPUS or "$(grep -c ^processor /proc/cpuinfo)"
-    if args.MEM == 0:
+    cpus = args.cpus or "$(grep -c ^processor /proc/cpuinfo)"
+    if args.mem == 0:
         mem=""
     else:
-        mem = f"--limitGenomeGenerateRAM {args.MEM}"
+        mem = f"--limitGenomeGenerateRAM {args.mem}"
     output = [bash_header()]
     output.append(dedent(f'''
         refdir={constants.ref_dir}
@@ -1179,20 +1209,20 @@ def star_make_idx(args):
             fi
         done
         STAR --runMode genomeGenerate --genomeDir $index \\
-            --genomeFastaFiles $dna --sjdbGTFfile $rna --sjdbOverhang {args.READLENGTH} \\
+            --genomeFastaFiles $dna --sjdbGTFfile $rna --sjdbOverhang {args.readlength} \\
             --runThreadN $cpus {mem} > $index.log 2> $index.err
     '''))
-    if args.SCRIPT:
-        with open(args.SCRIPT, "w") as tempout:
+    if args.script:
+        with open(args.script, "w") as tempout:
             print("\n".join(output), file=tempout)
-        os.chmod(args.SCRIPT, 0o755)
-        log_message(f"created {args.SCRIPT}")
+        os.chmod(args.script, 0o755)
+        log_message(f"created {args.script}")
     else:
         print("\n".join(output))
 
-    
+    _
 
-
+@cyc_app.command(group=cyc_group_align)
 def star(args):
     # output commands to fetch fastqs and run STAR and featureCounts
     test_executables(["samtools", "STAR"], exit_on_error=True)
@@ -1200,48 +1230,48 @@ def star(args):
         [constants.star.base_dir, constants.bin_dir, constants.ref_dir],
         exit_on_error=True,
     )
-    cpus = args.CPUS
-    sortcpus = args.SORT_CPUS
-    sortmem = args.SORTMEM
-    # prefetch = args.PREFETCH
-    verify_that_paths_exist(args.INPUTFILE)
-    if args.ABRA2COORDS:
-        verify_that_paths_exist(args.ABRA2COORDS)
+    cpus = args.cpus
+    sortcpus = args.sort_CPUS
+    sortmem = args.sortmem
+    # prefetch = args.prefetch
+    verify_that_paths_exist(args.inputfile)
+    if args.abra2COORDS:
+        verify_that_paths_exist(args.abra2COORDS)
         test_executables("abra2", exit_on_error=True)
     """
-    if args.RNASPADESCOORDS:
-        verify_that_paths_exist(args.RNASPADESCOORDS)
+    if args.rnaspadescoords:
+        verify_that_paths_exist(args.rnaspadescoords)
         test_executables(rnaspades.exe)
     """
-    outputdir = args.OUTPUTDIR
+    outputdir = args.outputdir
     counts_dir = os.path.join(outputdir, "counts")
     check_dir_write_access([outputdir, counts_dir])
     if glob.glob(f"{counts_dir}/*"):
-        log_message(f"\nCaution: files found in {counts_dir}\n", exit_now=True)
-    bamdestdir = args.BAMDESTDIR or ""
+        log_message(f"\nCaution: files found in {counts_dir}\n", fatal=True)
+    bamdestdir = args.bamdestdir or ""
     if bamdestdir:
         check_dir_write_access(bamdestdir)
-    if args.ABRA2COORDS:
+    if args.abra2COORDS:
         abra2dir = os.path.join(outputdir, "abra2")
         check_dir_write_access(abra2dir)
     """
-    if args.RNASPADESCOORDS:
+    if args.rnaspadescoords:
         rnaspadesdir = os.path.join(outputdir, "rnaspades")
         check_dir_write_access(rnaspadesdir)
         # rnaspadesdir = os.path.join(outputdir, "rnaspades")
         # temp = os.path.basename(os.path.realpath(outputdir))
         # rnaspadesdir = check_dir_write_access(dir = os.path.join(rnaspadesdir, temp))
     """
-    outputscript = args.SCRIPT  # os.path.join(outputdir, )
-    overwrite = args.OVERWRITE
+    outputscript = args.script  # os.path.join(outputdir, )
+    overwrite = args.overwrite
     if outputscript and not overwrite:
         exit_if_files_exist(outputscript)
-    indexpath, species = find_star_index(args.INDEX)
+    indexpath, species = find_star_index(args.index)
     # find gtf
     gtf = find_gtf(species=species)
-    fastq_source = args.FASTQSOURCE.upper()
+    fastq_source = args.fastqsource.upper()
     samples, fastq_fetch_params, star_fastq_files, read_type = parse_fastq_manifest(
-        inputfile=args.INPUTFILES,
+        inputfile=args.inputfiles,
         fastq_source=fastq_source,
         outputdir=outputdir,
         overwrite=overwrite,
@@ -1275,7 +1305,7 @@ def star(args):
     """))
 
     if fastq_source == "ENA":
-        function_name, function_code = bash_aspera(speed=args.TRANSFER_SPEED)
+        function_name, function_code = bash_aspera(speed=args.transfer_SPEED)
         bash_functions["getfastqs"] = function_name
         output.append(function_code)
         readFilesCommand = "zcat"
@@ -1288,7 +1318,7 @@ def star(args):
         readFilesCommand = "cat"
 
     function_name, function_code = bash_star(
-        cpus=args.CPUS, index=indexpath, readFilesCommand=readFilesCommand
+        cpus=args.cpus, index=indexpath, readFilesCommand=readFilesCommand
     )
     bash_functions["star"] = function_name
     output.append(function_code)
@@ -1299,7 +1329,7 @@ def star(args):
     bash_functions["sort BAM by read ID"] = function_name
     output.append(function_code)
 
-    if args.COUNTS:
+    if args.counts:
         function_name, function_code = bash_featurecounts(
             gtf=gtf, cpus=cpus, options=constants.featurecounts_options
         )
@@ -1322,9 +1352,9 @@ def star(args):
         star_cmd = bash_functions["star"]
         star_params = f'"{star_fastq_files[sample]}" {outputprefix}'
         other_opts = []
-        if args.ADD_OPTS:
-            other_opts.append(args.ADD_OPTS)
-        if args.ADDREADGROUP:
+        if args.add_OPTS:
+            other_opts.append(args.add_OPTS)
+        if args.addreadgroup:
             other_opts.append(f'--outSAMattrRGline \\"ID:{sample}\\"')
         other_opts = " ".join(other_opts)
         star_params += f' "{other_opts}"'
@@ -1340,7 +1370,7 @@ def star(args):
             rm {files_to_delete}
             #
         """))
-        if args.COUNTS:
+        if args.counts:
             featurecounts_cmd = bash_functions["featurecounts"]
             featurecounts_params = " ".join([tempbam[sample], countsfile[sample]])
             output.append(dedent(f"""
@@ -1383,7 +1413,7 @@ def star(args):
         {__file__} star_clear_mem --index {indexpath}
     """))
 
-    if bamdestdir and args.ABRA2COORDS: # or args.RNASPADESCOORDS):
+    if bamdestdir and args.abra2COORDS: # or args.rnaspadescoords):
         output.append(dedent(f"""
             log waiting for mvjobid=$mvjobid
             wait $mvjobid
@@ -1391,23 +1421,23 @@ def star(args):
             # temp = os.path.realpath(bamdestdir)
         """))
 
-    if args.ABRA2COORDS:
+    if args.abra2COORDS:
         srcdir = bamdestdir or os.path.realpath(outputdir)
         output.append(f"cp -s {srcdir}/*.bam {srcdir}/*.bai {abra2dir}/")
-        output.append(f"mv {args.ABRA2COORDS} {abra2dir}/")
+        output.append(f"mv {args.abra2COORDS} {abra2dir}/")
         output.append(f"cd {abra2dir}")
         output.append(
-            f"{__file__} abra2 -b *.bam -r {os.path.basename(args.ABRA2COORDS)} -z --exec"
+            f"{__file__} abra2 -b *.bam -r {os.path.basename(args.abra2COORDS)} -z --exec"
         )
         output.append(f"cd {os.path.realpath(outputdir)}")
     """
-    if args.RNASPADESCOORDS:
+    if args.rnaspadescoords:
         srcdir = bamdestdir or os.path.realpath(outputdir)
         output.append(f"cp -s {srcdir}/*.bam {srcdir}/*.bai {rnaspadesdir}")
-        output.append(f"mv {args.RNASPADESCOORDS} {rnaspadesdir}")
+        output.append(f"mv {args.rnaspadescoords} {rnaspadesdir}")
         output.append(f"cd {rnaspadesdir}")
         output.append(
-            f"{__file__} rnaspades -b *.bam -r {os.path.basename(args.RNASPADESCOORDS)} -z --exec"
+            f"{__file__} rnaspades -b *.bam -r {os.path.basename(args.rnaspadescoords)} -z --exec"
         )
         output.append(f"cd {os.path.realpath(outputdir)}")
     """
@@ -1421,11 +1451,11 @@ def featurecounts_ids(args):
     """
     Determines mapping to unique column names when inputs are combined
     """
-    files = args.INPUTFILES
+    files = args.inputfiles
     verify_that_paths_exist(files)
-    outputfile = args.OUTPUTFILE
+    outputfile = args.outputfile
     if outputfile:
-        outputdir = args.OUTPUTDIR.rstrip("/")
+        outputdir = args.outputdir.rstrip("/")
         outputfile = os.path.join(outputdir, outputfile)
         exit_if_files_exist(outputfile)
     output = []
@@ -1443,7 +1473,7 @@ def featurecounts_ids(args):
             newsamples.append(newsample)
 
     if len(newsamples) != len(set(newsamples)):
-        log_message("\nCaution: non-unique sample IDs\n", exit_now=True)
+        log_message("\nCaution: non-unique sample IDs\n", fatal=True)
 
     if outputfile:
         with open(outputfile, "w") as tempout:
@@ -1470,7 +1500,7 @@ def sum_counts(data=None, sum_column="sum", outputfile=None, overwrite=False):
     # if  outputfile is None, assumes stdout
     if outputfile and overwrite is False and os.path.exists(outputfile):
         log_message(
-            f"{outputfile} exists - delete it or allow overwrite", exit_now=True
+            f"{outputfile} exists - delete it or allow overwrite", fatal=True
         )
     # assert outputfile is not None, "malformed outputfile"
     samples = [
@@ -1486,32 +1516,32 @@ def sum_counts(data=None, sum_column="sum", outputfile=None, overwrite=False):
 
 def sumcounts(args):
     log_message("sum counts")
-    verify_that_paths_exist(args.INPUTFILE)
-    outputfile = args.OUTPUTFILE
+    verify_that_paths_exist(args.inputfile)
+    outputfile = args.outputfile
     # exit_if_files_exist(outputfile)
-    # header = None if args.NOHEADER else 0
-    data = pd.read_csv(args.INPUTFILE, sep="\t", header=0)
+    # header = None if args.noheader else 0
+    data = pd.read_csv(args.inputfile, sep="\t", header=0)
     sum_counts(
         data=data,
         sum_column="total_counts",
-        outputfile=args.OUTPUTFILE,
-        overwrite=args.OVERWRITE,
+        outputfile=args.outputfile,
+        overwrite=args.overwrite,
     )
     log_message(f"Total counts written to {outputfile or 'stdout'}")
 
 
 def add_gene_name(args):
     log_message("substitute gene name in expression counts if unique")
-    verify_that_paths_exist(args.INPUTFILE)
-    outputfile = args.OUTPUTFILE
+    verify_that_paths_exist(args.inputfile)
+    outputfile = args.outputfile
     if outputfile:
         exit_if_files_exist(outputfile)
-    species = args.SPECIES
+    species = args.species
     ref_file = f"${HOME}/star/ref/ens.to.gene.{species}.if.unique"
     gene_names = pd.read_csv(
         ref_file, sep="\t", header=None, names=["Geneid", "dummy"], dtype=object
     )
-    data = pd.read_csv(args.INPUTFILE, sep="\t", header=0, dtype=object)
+    data = pd.read_csv(args.inputfile, sep="\t", header=0, dtype=object)
     data = pd.merge(data, gene_names, on="Geneid", how="inner")
     data.insert(0, "gene_name", "")
     data["gene_name"] = data["dummy"]
@@ -1523,23 +1553,23 @@ def add_gene_name(args):
 
 def merge_counts(args):
     log_message("merge counts")
-    files = args.INPUTFILES
+    files = args.inputfiles
     verify_that_paths_exist(files)
-    outputfile = args.OUTPUTFILE
-    outputdir = args.OUTPUTDIR.rstrip("/")
-    totals = args.TOTALS
+    outputfile = args.outputfile
+    outputdir = args.outputdir.rstrip("/")
+    totals = args.totals
     if outputdir:
         #if outputfile and os.sep in outputfile:
         if outputfile and os.path.basename(args.outputfile) != args.outputfile:
             log_message(
-                "outputfile cannot include dir if outputdir is specified", exit_now=True
+                "outputfile cannot include dir if outputdir is specified", fatal=True
             )
         if totals and os.path.basename(totals) != totals:
             log_message(
                 "output file for totals cannot include dir if outputdir is specified",
-                exit_now=True,
+                fatal=True,
             )
-        totals = args.TOTALS
+        totals = args.totals
         outputfile = os.path.join(outputdir, outputfile)
         totals = os.path.join(outputdir, totals)
         exit_if_files_exist([outputfile, totals])
@@ -1548,12 +1578,12 @@ def merge_counts(args):
         data = get_one_file_of_counts(file=file)
         if common_samples := set(data.columns[1:]) & set(output.columns[1:]):
             common_samples = "\n".join(common_samples)
-            log_message(f"Common sample IDs:\n{common_samples}", exit_now=True)
+            log_message(f"Common sample IDs:\n{common_samples}", fatal=True)
         output = output.merge(data, how="inner", on="Geneid")
-    rename_samples = args.RENAME_SAMPLES
+    rename_samples = args.rename_SAMPLES
     if rename_samples:
         rename_samples = pd.read_csv(
-            args.RENAME_SAMPLES,
+            args.rename_SAMPLES,
             header=None,
             sep="\t",
             usecols=[0, 1],
@@ -1568,57 +1598,57 @@ def merge_counts(args):
 
 
 def rank_values(args):
-    verify_that_paths_exist(args.INPUTFILE)
-    if args.OUTPUTFILE and not args.OVERWRITE:
-        exit_if_files_exist(args.OUTPUTFILE)
+    verify_that_paths_exist(args.inputfile)
+    if args.outputfile and not args.overwrite:
+        exit_if_files_exist(args.outputfile)
 
-    temp = pd.read_csv(args.INPUTFILE, sep="\t", header=0, comment="#", nrows=1)
-    if args.COLUMN:
+    temp = pd.read_csv(args.inputfile, sep="\t", header=0, comment="#", nrows=1)
+    if args.column:
         verify_columns_present(
-            data=temp, columns=args.COLUMN, source=args.INPUTFILE
+            data=temp, columns=args.column, source=args.inputfile
         )
-        if not args.NEWCOLUMN:
-            newcolumn = f"rank_by_{args.COLUMN}"
+        if not args.newcolumn:
+            newcolumn = f"rank_by_{args.column}"
     else:
-        if args.SORT:
-            log_message("There is no sense in sorting by the rank", exit_now=True)
-        newcolumn = args.NEWCOLUMN or "order"
+        if args.sort:
+            log_message("There is no sense in sorting by the rank", fatal=True)
+        newcolumn = args.newcolumn or "order"
     verify_columns_absent(
-            data=temp,  columns=newcolumn, source=args.INPUTFILE
+            data=temp,  columns=newcolumn, source=args.inputfile
         )
-    data = pd.read_csv(args.INPUTFILE, sep="\t", header=0, comment="#")
+    data = pd.read_csv(args.inputfile, sep="\t", header=0, comment="#")
 
-    if args.COLUMN:
-        if args.SORT:
-            data.sort_values(by=args.COLUMN, ascending = args.ORDER == "ascending", inplace=True)
-        data[newcolumn] = data[args.COLUMN].rank(method="min").astype(int)
+    if args.column:
+        if args.sort:
+            data.sort_values(by=args.column, ascending = args.order == "ascending", inplace=True)
+        data[newcolumn] = data[args.column].rank(method="min").astype(int)
     else:
         data[newcolumn] = list(range(1, data.shape[0]+1))
-    data.to_csv(args.OUTPUTFILE if args.OUTPUTFILE else sys.stdout, sep="\t", index=False)
+    data.to_csv(args.outputfile if args.outputfile else sys.stdout, sep="\t", index=False)
 
 
 def transformcounts(args):
     log_message("transform counts")
-    verify_that_paths_exist(args.INPUTFILE)
-    method = args.METHOD.lower()
-    if "log2" in method and args.LOG2_OFFSET <= 0:
+    verify_that_paths_exist(args.inputfile)
+    method = args.method.lower()
+    if "log2" in method and args.log2_OFFSET <= 0:
         log_message(
-            "log2_offset must be positive when applying log", exit_now=True
+            "log2_offset must be positive when applying log", fatal=True
         )
 
-    outputfile = args.OUTPUTFILE
+    outputfile = args.outputfile
     if not outputfile:
         outputfile = f"{method.lower()}.txt"
-    overwrite = args.OVERWRITE
+    overwrite = args.overwrite
     if outputfile and overwrite is False:
         exit_if_files_exist(outputfile)
 
     # get metadata
-    metadata = args.METADATA
+    metadata = args.metadata
     if metadata:
-        metadata = os.path.join(os.path.dirname(args.INPUTFILE), metadata)
+        metadata = os.path.join(os.path.dirname(args.inputfile), metadata)
         verify_that_paths_exist(metadata)
-        use_genenames = args.GENE_NAMES if metadata else 0
+        use_genenames = args.gene_NAMES if metadata else 0
         metadata_columns_to_get = ["Geneid", "Length", "gene_biotype"]
         if use_genenames:
             metadata_columns_to_get.append("gene_name")
@@ -1629,11 +1659,11 @@ def transformcounts(args):
         metadata = pd.read_csv(
             metadata, sep="\t", header=0, usecols=metadata_columns_to_get, comment="#"
         )
-        gene_types = args.GENE_TYPES
+        gene_types = args.gene_TYPES
         if gene_types and gene_types != "all":
             mask = metadata["gene_biotype"].isin(gene_types)
             metadata = metadata[mask].copy()
-    data = pd.read_csv(args.INPUTFILE, sep="\t", header=0)
+    data = pd.read_csv(args.inputfile, sep="\t", header=0)
     #  sum counts in case gene IDs are repeaed
     data = data.groupby(data.columns[0], as_index=False).sum()
     samples = [
@@ -1641,7 +1671,7 @@ def transformcounts(args):
     ]
 
     # ["CPM", "CPM-UQ", "CPM-UQ-log2", "RPKM", "RPKM-UQ", "RPKM-UQ-log2"]
-    temp_output = f"{args.TOTALS}.txt"
+    temp_output = f"{args.totals}.txt"
     total_counts = sum_counts(
         data=data,
         sum_column="total_counts",
@@ -1664,7 +1694,7 @@ def transformcounts(args):
         if use_genenames:
             data = data.groupby(data.columns[0], as_index=False).sum()
 
-        temp_output = f"{args.TOTALS}_filtered.txt"
+        temp_output = f"{args.totals}_filtered.txt"
         total_counts = sum_counts(
             data=data, sum_column="filtered_totals", outputfile=temp_output
         )
@@ -1683,9 +1713,9 @@ def transformcounts(args):
             elif method.startswith("cpm"):
                 data[sample] *= 1000000 / total_counts[sample]
             else:
-                log_message(f"Unknown method {method}", exit_now=True)
+                log_message(f"Unknown method {method}", fatal=True)
 
-        temp_output = f"{args.TOTALS}_sum_{method}.txt"
+        temp_output = f"{args.totals}_sum_{method}.txt"
         sum_counts(
             data=data,
             sum_column=f"sum_{method}",
@@ -1703,11 +1733,11 @@ def transformcounts(args):
             .set_index("Geneid")
             .applymap(lambda x: x if x > 0 else np.NAN)
         )
-        pct = np.nanpercentile(tempdata, args.RESCALE_PERCENTILE, axis=0)
-        data[samples] = data[samples] * args.RESCALE_COMMON_VALUE / pct
+        pct = np.nanpercentile(tempdata, args.rescale_PERCENTILE, axis=0)
+        data[samples] = data[samples] * args.rescale_COMMON_VALUE / pct
 
     if "log2" in method:
-        data[samples] = np.log2(data[samples].applymap(lambda x: x + args.LOG2_OFFSET))
+        data[samples] = np.log2(data[samples].applymap(lambda x: x + args.log2_OFFSET))
 
     data.round(2).to_csv(outputfile or sys.stdout, sep="\t", index=False)
 
@@ -1717,10 +1747,10 @@ def transformcounts(args):
 
 def counts_postproc(args):
     output = []
-    if args.SCRIPT:
-        exit_if_files_exist(args.SCRIPT)
-    dir = args.DIR.rstrip("/")
-    species = args.SPECIES
+    if args.script:
+        exit_if_files_exist(args.script)
+    dir = args.dir.rstrip("/")
+    species = args.species
     output = []
     output.append(bash_header())
     output.append(dedent(f"""
@@ -1755,18 +1785,18 @@ def counts_postproc(args):
     """))
 
     # output = ["#!/bin/bash\n"] + output
-    cmd = f"{args.SCRIPT} &>> {args.SCRIPT}.log" if args.SCRIPT else ""
+    cmd = f"{args.script} &>> {args.script}.log" if args.script else ""
     handle_commands_and_output(
         commands=output,
-        outputfile=args.SCRIPT,
+        outputfile=args.script,
         single_line_command=cmd,
-        execute =args.EXEC,
+        execute =args.exec,
     )
 
-
+@cyc_app.command(group=cyc_group_align)
 def star_zip_files(args):
-    dir = args.DIR.rstrip("/")
-    outputscript = args.SCRIPT
+    dir = args.dir.rstrip("/")
+    outputscript = args.script
     if outputscript:
         exit_if_files_exist(outputscript)
     # find_err_files = f"find {dir} -maxdepth 1 -name \"*.err\""
@@ -1796,17 +1826,18 @@ def star_zip_files(args):
         commands=output,
         outputfile=outputscript,
         single_line_command=cmd,
-        execute =args.EXEC,
+        execute =args.exec,
     )
 
+cyc_group_align = cyclopts.Group.create_ordered("")
 def star_clear_mem(args):
-    outputscript = args.SCRIPT
+    outputscript = args.script
     if outputscript:
         exit_if_files_exist(outputscript)
     verify_that_paths_exist(constants.star.dummy_fastq)
     output = [bash_header()]
     output.append(dedent(f"""
-        STAR --genomeDir {args.INDEX} --readFilesIn {constants.star.dummy_fastq} --runThreadN 4 --outFile_or_DirPrefix ${constants.star.dummy_fastq}. --genomeLoad Remove --runMode alignReads"
+        STAR --genomeDir {args.index} --readFilesIn {constants.star.dummy_fastq} --runThreadN 4 --outFile_or_DirPrefix ${constants.star.dummy_fastq}. --genomeLoad Remove --runMode alignReads"
     """))
     # --outSAMtype BAM Unsorted --outSAMprimaryFlag AllBestScore --outFilterMultimapScoreRange 0 --outFilterMultimapNmax 25 --seedMultimapNmax 250 --seedPerReadNmax 250 --alignTranscriptsPerReadNmax 1000 --limitOutSJoneRead 100 --alignWindowsPerReadNmax 250 
     output = output.dedent()
@@ -1819,13 +1850,13 @@ def star_clear_mem(args):
 
 def text_to_fasta(args):
     # inputs tab-delimited text, outputs fasta
-    check_for_file_xor_stdin(args.INPUTFILE)
-    outputfile = args.OUTPUTFILE
+    check_for_file_xor_stdin(args.inputfile)
+    outputfile = args.outputfile
     if outputfile:
         exit_if_files_exist(outputfile)
     # seq = ""
-    minlength = args.MIN_LENGTH
-    with open(args.INPUTFILE, "r") if args.INPUTFILE else sys.stdin as tempin:
+    minlength = args.min_LENGTH
+    with open(args.inputfile, "r") if args.inputfile else sys.stdin as tempin:
         with open(outputfile, "w") if outputfile else sys.stdout as tempout:
             line = tempin.readline()
             temp = line.rstrip().split("\t")
@@ -1844,23 +1875,36 @@ def text_to_fasta(args):
                     print(f">{line.rstrip()}", file=tempout)
                     # tempout.write(">" + line)
 
+@dataclass
+class fasta_to_text:
+    inputfile: File_or_Dir | None = None
+    "Input file."
 
+    minlength: int = 0
+    "Minimum length"
+
+    outputfile: File_or_Dir | None = None
+    "Output file. Stdout if omitted."
+# join
+
+@cyc_app.command()
 def fasta_to_text(args):
+    help_text ="Convert fasta file to tab-delimited text."
     # inputs fasta file, outputs text file with header row
     # presumably called from command line
     # output to a file
-    if args.INPUTFILE:
-        verify_that_paths_exist(args.INPUTFILE)
+    if args.inputfile:
+        verify_that_paths_exist(args.inputfile)
     else:
         detect_stdin(exit_on_error=True)
-    outputfile = args.OUTPUTFILE
+    outputfile = args.outputfile
     if outputfile:
         exit_if_files_exist(outputfile)
-    minlength = args.MIN_LENGTH
+    minlength = args.min_LENGTH
     seq = ""
     if minlength:
         log_message(f"Caution: min length = {minlength}")
-    with open(args.INPUTFILE, "r") if args.INPUTFILE else sys.stdin as tempin:
+    with open(args.inputfile, "r") if args.inputfile else sys.stdin as tempin:
         with open(outputfile, "w") if outputfile else sys.stdout as tempout:
             print("ID\tsequence", file=tempout)
             for line in tempin:
@@ -1882,14 +1926,14 @@ def fasta_to_text(args):
 
 """
 def join(args):
-    inputfiles = args.INPUTFILES
+    inputfiles = args.inputfiles
     if len(inputfiles) != 2:
-        log_message("Specify two input files", exit_now=True)
+        log_message("Specify two input files", fatal=True)
     verify_that_paths_exist(inputfiles)
-    outputfile = args.OUTPUTFILE
+    outputfile = args.outputfile
     if outputfile: exit_if_files_exist(outputfile)
-    method = args.METHOD
-    columns = args.COLUMNS
+    method = args.method
+    columns = args.columns
     if len(columns) == 2:
         for i, cols in enumerate(columns):
             columns[i] = cols.split(",")
@@ -1898,7 +1942,7 @@ def join(args):
         columns[0] = columns[0].split(",")
         #columns += columns[0]
     else:
-        log_message("Invalid columns", exit_now=True)
+        log_message("Invalid columns", fatal=True)
     data = []
     for i in [0, 1]:
         data.append(pd.read_csv(inputfiles[i], sep="\t", header = 0, dtype=object))
@@ -1907,8 +1951,8 @@ def join(args):
         verify_columns_present(data = data[i], columns=columns[i], source = inputfiles[i])
     output = pd.merge(data[0], data[1], left_on = columns[0], right_on=columns[1], how = method)
     if output.empty:
-        log_message("No common column values", exit_now=True)
-    if args.DEDUP:
+        log_message("No common column values", fatal=True)
+    if args.dedup:
         output = dedup_cols(data=output)
     output.to_csv(outputfile if outputfile else sys.stdout, sep="\t", index=False)
 """
@@ -1985,31 +2029,31 @@ def bash_minimap(*, cpus: int, bases_loaded: str, genome: str, junctions: File_o
 def minimap(args):
     # needs coords and either gene bams or non-gene BAMs, but not both
     test_executables("minimap2")
-    # outputfileext = args.EXT
-    verify_that_paths_exist(args.INPUTFILES)
-    outputscript = args.SCRIPT
+    # outputfileext = args.ext
+    verify_that_paths_exist(args.inputfiles)
+    outputscript = args.script
     exit_if_files_exist(outputscript)
-    species = args.SPECIES
+    species = args.species
     junctions = constants.minimap_junctions[species]
     genome = constants.minimap_genome[species]
     if genome == "":
-        log_message(f"No minimap genome index for {species}", exit_now=True)
+        log_message(f"No minimap genome index for {species}", fatal=True)
     if junctions == "":
-        log_message(f"No minimap junctions for {species}", exit_now=True)
+        log_message(f"No minimap junctions for {species}", fatal=True)
     genome = os.path.join(constants.ref_dir, genome)
     junctions = os.path.join(constants.ref_dir, junctions)
     verify_that_paths_exist([genome, junctions])
-    outputformat = args.OUTPUTFORMAT
+    outputformat = args.outputformat
     # outputfileprefix = {x: minimap_output_file(inputfile=x, ext=outputfileext) for x in inputfiles}
-    outputfileprefix = {x: minimap_output_file(inputfile=x) for x in args.INPUTFILES}
+    outputfileprefix = {x: minimap_output_file(inputfile=x) for x in args.inputfiles}
     exit_if_files_exist([f"{x}.{outputformat}" for x in outputfileprefix.values()])
     output = []
     output.append(bash_header())
     function_name, function_code = bash_minimap(
-        cpus=args.CPUS, bases_loaded=args.MEM, genome=genome, junctions=junctions
+        cpus=args.cpus, bases_loaded=args.mem, genome=genome, junctions=junctions
     )
     output.append(function_code)
-    for inputfile in args.INPUTFILES:
+    for inputfile in args.inputfiles:
         output.append(f"# {inputfile}")
         output.append(
             f"{function_name} {inputfile} {outputfileprefix[inputfile]} {outputformat}"
@@ -2019,7 +2063,7 @@ def minimap(args):
         commands=output,
         outputfile=outputscript,
         single_line_command=cmd,
-        execute =args.EXEC,
+        execute =args.exec,
     )
 
     # bam2Bed12.py -i transcripts.fasta.v4.bam > transcripts.fasta.v4.bed2.txt
@@ -2029,24 +2073,24 @@ def ens_to_gene(args):
     gtf_chr =  0
     gtf_feature_type =  2
     gtf_features =  -1
-    if args.SPECIES:
-        if args.INPUTFILE or args.OUTPUTFILE:
-            log_message("Specify species, or specify input and output files.", exit_now=True)
-        inputfile = os.path.expandvars(constants.gtf[args.SPECIES])
+    if args.species:
+        if args.inputfile or args.outputfile:
+            log_message("Specify species, or specify input and output files.", fatal=True)
+        inputfile = os.path.expandvars(constants.gtf[args.species])
         if not os.path.exists(inputfile):
             if os.path.exists(inputfile + ".gz"):
                 cmd = f"gunzip --keep {inputfile}.gz"
                 log_message(f"Executing {cmd}")
                 execute_command(cmd)
-        outputfile = constants.featurecounts.unique_IDs[args.SPECIES]
+        outputfile = constants.featurecounts.unique_IDs[args.species]
         outputfile = os.path.expandvars(outputfile)
     else:
-        if args.INPUTFILE is None or args.OUTPUTFILE is None:
-            log_message("Specify both input file and output file, or specify species.", exit_now=True)
-        inputfile = args.INPUTFILE
-        outputfile = args.OUTPUTFILE
+        if args.inputfile is None or args.outputfile is None:
+            log_message("Specify both input file and output file, or specify species.", fatal=True)
+        inputfile = args.inputfile
+        outputfile = args.outputfile
     verify_that_paths_exist(inputfile)
-    if not args.OVERWRITE:
+    if not args.overwrite:
         exit_if_files_exist(outputfile)
     # (inputfile: File_or_Dir, *, outputfile: File_or_Dir|None=None, sort: bool = False, subset=["protein_coding"]):
     gtf_features =  -1
@@ -2080,24 +2124,24 @@ def ens_to_gene(args):
     log_message(f"created {outputfile}")
 
 def gtf_to_coords(args):
-    if args.SPECIES:
-        if args.INPUTFILE or args.OUTPUTFILE:
-            log_message("Specify species, or specify input and output files.", exit_now=True)
-        inputfile = os.path.expandvars(constants.gtf[args.SPECIES])
+    if args.species:
+        if args.inputfile or args.outputfile:
+            log_message("Specify species, or specify input and output files.", fatal=True)
+        inputfile = os.path.expandvars(constants.gtf[args.species])
         if not os.path.exists(inputfile):
             if os.path.exists(inputfile + ".gz"):
                 cmd = f"gunzip --keep {inputfile}.gz"
                 log_message(f"Executing {cmd}")
                 execute_command(cmd)
-        outputfile = constants.coords_source_file[args.SPECIES]
+        outputfile = constants.coords_source_file[args.species]
         outputfile = os.path.expandvars(outputfile)
     else:
-        if args.INPUTFILE is None or args.OUTPUTFILE is None:
-            log_message("Specify both input file and output file, or specify species.", exit_now=True)
-        inputfile = args.INPUTFILE
-        outputfile = args.OUTPUTFILE
+        if args.inputfile is None or args.outputfile is None:
+            log_message("Specify both input file and output file, or specify species.", fatal=True)
+        inputfile = args.inputfile
+        outputfile = args.outputfile
     verify_that_paths_exist(inputfile)
-    if not args.OVERWRITE:
+    if not args.overwrite:
         exit_if_files_exist(outputfile)
 
     # (inputfile: File_or_Dir, *, outputfile: File_or_Dir|None=None, sort: bool = False, subset=["protein_coding"]):
@@ -2137,18 +2181,18 @@ def gtf_to_coords(args):
     data = pd.DataFrame(data, columns = "chr start stop gene_name gene_id gene_biotype".split())
     log_message("chromosomes skipped: " + ", ".join(list(chrs_skipped)))
     log_message(f"{len(genes_skipped)} genes skipped due to name unknown or C..orf..")
-    if args.GENES:
+    if args.genes:
         genes_before = data.shape[0]
         biotypes = data["gene_biotype"].unique().tolist()
-        if common := set(args.GENES) & set(biotypes):
-            if missing := set(args.GENES) - set(biotypes):
+        if common := set(args.genes) & set(biotypes):
+            if missing := set(args.genes) - set(biotypes):
                 log_message("Biotypes not found in GTF:\n\t" + "\n\t".join(list(missing)))
             mask = data["gene_biotype"].isin(common)
             data = data[mask].copy()
         else:
-            log_message("None of the biotypes are not found in the GTF.", exit_now=True)
+            log_message("None of the biotypes are not found in the GTF.", fatal=True)
         log_message(f"{data.shape[0]} of {genes_before} genes retained")
-    if args.SORT:
+    if args.sort:
         data["temp_chr"] = data["chr"].str.replace("chr","")
         data["temp_isdigit"] = [1 if x.isdigit() else 0 for x in data["temp_chr"]]
         for col in ["start", "stop"]:
@@ -2171,17 +2215,17 @@ def find_star_index(index=None):
     index = os.path.basename(index)
     species = index.split(".")[0]
     if not species in constants.known_species:
-        log_message(f"Unknown species {species}", exit_now=True)
+        log_message(f"Unknown species {species}", fatal=True)
     for dir in constants.index_stores:
         indexpath = os.path.join(dir, index)
         if os.path.exists(indexpath):
             if dir != constants.star.base_dir:
                 log_message(
                     f"nice cp -r {indexpath} {constants.star.base_dir} &"
-                )  # , exit_now=True)
+                )  # , fatal=True)
             return indexpath, species
     temp = "\n".join(constants.index_stores)
-    log_message(f"{index} not found in:\n{temp}", exit_now=True)
+    log_message(f"{index} not found in:\n{temp}", fatal=True)
 
 # STAR
 
@@ -2218,6 +2262,9 @@ def bash_check_transfer_speed(file_name="aspera.speed"):
     code = dedent(text=code)
     return bash_function_name, code
 '''
+
+
+
 
 
 if __name__ == "__main__":

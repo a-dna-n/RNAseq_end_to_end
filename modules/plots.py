@@ -44,7 +44,7 @@ class _junction_variant_list_args:
 
     inputfile: FileName
     "Chr-start-stop coords + name."
-
+ 
     outputfile: FileName | None = None
     "Defaults to input + bed."
 
@@ -65,7 +65,6 @@ def output_junction_variant_list(args: _junction_variant_list_args):
     outputfile  = args.outputfile or args.inputfile + ".bed"
     if not args.overwrite:
          exit_if_files_exist(outputfile)
-    # 15	98704550	98794085	Kmt2d	ENSMUSG00000048154	protein_coding
     """    
     with open(args.inputfile, "r") as tempin:
         with (open(regions, "w") as tempout:

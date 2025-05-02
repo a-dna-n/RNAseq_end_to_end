@@ -1,3 +1,5 @@
+# caution - work in progress
+
 name: rnaseq
 channels:
   - bioconda
@@ -16,6 +18,7 @@ dependencies:
   - samtools #=1.18
   - cyclopts
   - python-calamine
+  - metapub
   - jinja2
 # - bedtools #=2.31.1
 # - pybedtools #=0.9.1

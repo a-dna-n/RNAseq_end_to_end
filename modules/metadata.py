@@ -26,12 +26,13 @@ cyc_app = cyclopts.App(help = "Functions to retrieve metadata (SRA, GEO, ENA), d
 
 # cyc_group = cyclopts.Group.create_ordered("Metadata commands")
 # Define cyclopts command groups
-cyc_metadata_geo = cyclopts.Group.create_ordered("Metadata commands - GEO")
-cyc_metadata_pysradb = cyclopts.Group.create_ordered("Metadata commands - pysradb")
-cyc_metadata_ena = cyclopts.Group.create_ordered("Metadata commands - ENA")
-cyc_data_geo = cyclopts.Group.create_ordered("Data commands - GEO")
-cyc_metadata_utils = cyclopts.Group.create_ordered("Metadata commands - utils")
-cyc_metadata_test = cyclopts.Group.create_ordered("Metadata commands - test")
+cyc_metadata_geo = cyclopts.Group.create_ordered("Metadata - GEO")
+cyc_metadata_pysradb = cyclopts.Group.create_ordered("Metadata - pysradb")
+cyc_metadata_ena = cyclopts.Group.create_ordered("Metadata - ENA")
+cyc_data_geo_authors = cyclopts.Group.create_ordered("GEO author data")
+cyc_data_ncbi_counts = cyclopts.Group.create_ordered("NCBI counts")
+cyc_metadata_utils = cyclopts.Group.create_ordered("Metadata - utils")
+cyc_metadata_test = cyclopts.Group.create_ordered("Metadata - test")
 
 @cyclopts.Parameter(name="*")
 @dataclass
@@ -40,7 +41,7 @@ class _metadata_args:
     _: KW_ONLY
 
     study: str
-    "SRA or GEO study ID e.g. SRP294329, GSE117552"
+    "SRA or GEO study ID e.g. SRP294329, GSE295807"
 
     outputdir: File_or_Dir
     "Folder where metadata files will be stored."
@@ -56,31 +57,22 @@ class _metadata_args:
 
 
 test_cases_GEO = {
-    # mouse - GSE275562 has multiple data types, which should be filtered subsequently
-    "mouse": ["GSE275562", "GSE263778", "GSE286314"],
+    # mouse - GSE275562 has RNA-seq and ATAC-seq, should be filtered subsequently
+    "mouse": ["GSE275562", "GSE295807", "GSE295807"],
 
     # human - studies can have NCBI- and/or author-generated data
-    "human": ["GSE213519", "GSE173475", "GSE233661"],
+    "human": ["GSE295807", "GSE295807", "GSE295807"],
 
     # chicken, zebrafish etc. - should not produce outputs beyond matrix files
-    "xeno": ["GSE278071", "GSE87528", "GSE283071", "GSE276850"],
+    #xeno": ["GSE278071", "GSE87528", "GSE283071", "GSE276850"],
 
     # invalid ID but gets a response from GEO
     "invalid": ["GSE239mmn"]
 }
 
-'''
-# additional tests
-PRJNA931290
-SRP294329
-SRP326996
-SRP452987
-GSE179462
-SRP326996
-'''
 
 test_cases_ENA = {
-    
+    "dummy": ["PRJNA1151677", "PRJNA690137",  "PRJNA1256417"]
 }
 
 
@@ -88,8 +80,9 @@ test_cases_ENA = {
 def test_get_ENA_fastq_list():
     """Test retrieval of fastq list from ENA.
     """
-    data, outputfile = ENA_get_fastq_list(ID = "PRJNA931290", outputdir =  "test/ENA/PRJNA931290")
-    data, outputfile = ENA_reformat_fastq_list(data = data, outputfile = outputfile)
+    for _ID in ["PRJNA1151677", "PRJNA690137",  "PRJNA1256417"]:
+        data, outputfile = ENA_get_fastq_list(ID = ID, outputdir =  f"test/ENA/{_ID}")
+        data, outputfile = ENA_reformat_fastq_list(data = data, outputfile = outputfile)
 
 @cyc_app.command(group=cyc_metadata_test)
 def test_get_NCBI_counts():
@@ -123,7 +116,7 @@ def test_GEO_get_series_metadata_files(*, overwrite: bool=False):
 # input = list of series matrix files
 # output = Bash script to retrieve any supplementary files, or None if None
 
-@cyc_app.command(group=cyc_data_geo)
+@cyc_app.command(group=cyc_data_geo_authors)
 def GEO_get_authors_files(*, inputfiles: Annotated[list[File_or_Dir], cyclopts.Parameter(consume_multiple=True)],
 outputdir: File_or_Dir, study: str, overwrite: bool = False):
     """Generate a script to retrieve data files posted by authors in GEO, if they exist.
@@ -261,10 +254,10 @@ def GEO_get_series_metadata_files(geo_id: str, *, unzip: bool=True)-> list[str]:
     """    
     # "Get metadata from GEO"
     if not re.match(r"GSE\d+$", geo_id):
-        log_message("Specify a GEO series ID e.g. GSE154891", fatal=True)
-    # input = GEO series ID, e.g. GSE154891
-    # retrieves info for that GEO series: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE154891
-    # https://ftp.ncbi.nlm.nih.gov/geo/series/GSE239nnn/GSE239889/matrix/
+        log_message("Specify a GEO series ID e.g. GSE295807", fatal=True)
+    # input = GEO series ID, e.g. GSE295807
+    # retrieves info for that GEO series: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE295807
+    # https://ftp.ncbi.nlm.nih.gov/geo/series/GSE295nnn/GSE295807/matrix/
 
     matrix_files = []
     url = f"https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={geo_id}"
@@ -335,19 +328,19 @@ def GEO_get_metadata(args: _metadata_args) -> None: #pd.DataFrame:*, study: str,
         log_message(f"Found {args.study} via pysradb.")
     """
     if not re.match(r"GSE\d+$", args.study):
-        log_message("Specify a GEO series ID e.g. GSE154891", fatal=True)
+        log_message("Specify a GEO series ID e.g. GSE295807", fatal=True)
     """
     if not SRA_study:
         # a GEO series was specified - attempt to find SRP
         SRA_study = _pySRAdb_convert_ID(ID = args.study, fn = "gse-to-srp") 
     """
-    # input = GEO series args.study, e.g. GSE154891
+    # input = GEO series args.study, e.g. GSE295807
     # retrieves info for that GEO series:
     # GEO series home page - has links to author-submitted and NCBI counts (direct), indirect to matrix page
-    # https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE154891
+    # https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE295807
 
-    # direct:https://ftp.ncbi.nlm.nih.gov/geo/series/GSE162nnn/GSE162198/matrix/
-    # https://ftp.ncbi.nlm.nih.gov/geo/series/GSE239nnn/GSE239889/matrix/
+    # direct:https://ftp.ncbi.nlm.nih.gov/geo/series/GSE295nnn/GSE295807/matrix/
+    # https://ftp.ncbi.nlm.nih.gov/geo/series/GSE295nnn/GSE295807/matrix/
 
     check_dir_write_access(args.outputdir)
     #if os.path.basename(outputfileprefix) != outputfileprefix:
@@ -362,7 +355,7 @@ def GEO_get_metadata(args: _metadata_args) -> None: #pd.DataFrame:*, study: str,
                  matrix_file_urls.append(f"{matrix_page}/{temp}")
             else:
                  log_message(f"Parsing error in {line} from {matrix_page}.", fatal=True)
-            # https://ftp.ncbi.nlm.nih.gov/geo/series/GSE239nnn/GSE239889/matrix/GSE239889-GPL24247_series_matrix.txt.gz
+            # https://ftp.ncbi.nlm.nih.gov/geo/series/GSE295nnn/GSE295807/matrix/GSE295807-GPL24247_series_matrix.txt.gz
     local_files = []
     for url in matrix_file_urls:
         local_gz = os.path.join(args.outputdir, os.path.basename(url))
@@ -487,10 +480,10 @@ def _geo_matrix_to_dataframes(inputfile):
     """
     Parse GEO series metadata
         !Series_title	"Epigenomic Activation ..."
-        !Series_geo_accession	"GSE164360"
+        !Series_geo_accession	"GSE..."
         ...
-        !Series_relation	"BioProject: https://www.ncbi.nlm.nih.gov/bioproject/PRJNA690106"
-        !Series_relation	"SRA: https://www.ncbi.nlm.nih.gov/sra?term=SRP300663"
+        !Series_relation	"BioProject: https://www.ncbi.nlm.nih.gov/bioproject/PRJNA..."
+        !Series_relation	"SRA: https://www.ncbi.nlm.nih.gov/sra?term=SRP..."
     """
 
     series_data = [x[1:] for x in data_by_entity["Series"]]
@@ -910,7 +903,7 @@ def geo(args: geo_md_args) -> None:
 
 @cyc_app.command(group=cyc_metadata_pysradb)
 def pySRAdb_get_metadata(args: _metadata_args) -> None: #pd.DataFrame:
-    """Find metadata and files available from SRA, GEO and and ENA.
+    """Find metadata and files available from SRA.
     
     Args:
         args (_metadata_args): work in progress
@@ -950,7 +943,8 @@ def pySRAdb_get_metadata(args: _metadata_args) -> None: #pd.DataFrame:
         data.to_csv(outputfile, sep="\t",  index=False)
         log_message(f"pySRAdb metadata for {args.study} written to {outputfile}")
     if args.parse:
-        pySRAdb_parse_metadata(data=data, SRA_study = args.study, species = known_species, expt_type = known_expt_types, outputfileprefix = outputfile.replace(".txt",""), overwrite=True)
+        #pySRAdb_parse_metadata(data=data, SRA_study = args.study, species = known_species, expt_type = known_expt_types, outputfileprefix = outputfile.replace(".txt",""), overwrite=True)
+        pySRAdb_parse_metadata(inputfile=outputfile, SRA_study = args.study, species = known_species, expt_type = known_expt_types, outputfileprefix = outputfile.replace(".txt",""), overwrite=True)
 
     #return data
 
@@ -963,14 +957,14 @@ def _pySRAdb_convert_ID(*, ID: str, fn: str) ->str:
     
         > pysradb gsm-to-gse GSM4679562
         study_alias	study_accession
-        GSE154783	SRP272683
+        GSE295807	SRP272683
 
     Args:
         ID (str): the ID to convert
         fn (str): the function to use
 
     Returns:
-        str: ID in the specified namespace, e.g. GSE154783 in the example above
+        str: ID in the specified namespace, e.g. GSE295807 in the example above
     """
     cmd = f"pysradb {fn} {ID}"
     log_message(cmd)
@@ -990,8 +984,9 @@ def _pySRAdb_convert_ID(*, ID: str, fn: str) ->str:
 @cyc_app.command(group=cyc_metadata_pysradb)
 def pySRAdb_parse_metadata(
     *,
-    data: pd.DataFrame,
-    SRA_study: str,
+    #data: pd.DataFrame,
+    inputfile: FileName,
+    study: str,
     species: Annotated[list[str], cyclopts.Parameter(consume_multiple=True)],
     expt_type: Annotated[list[str], cyclopts.Parameter(consume_multiple=True)],
     outputfileprefix: str = constants.file_prefix.pysradb,
@@ -1009,8 +1004,8 @@ def pySRAdb_parse_metadata(
         species = [species]
     if isinstance(expt_type, str):
         expt_type = [expt_type]
-    if not SRA_study in outputfileprefix:
-        outputfileprefix = "_".join([outputfileprefix, SRA_study])
+    if not study in outputfileprefix:
+        outputfileprefix = "_".join([outputfileprefix, study])
     outputfile = {(sp, ex): "_".join([outputfileprefix, constants.species_unalias[sp], ex])+".txt" for sp in species for ex in expt_type}
     if not overwrite:
         exit_if_files_exist(outputfile.values())
@@ -1247,34 +1242,41 @@ def pySRAdb_parse_metadata(
 
 '''
 
-ENA can provide some sample info:
+ENA provides some sample info:
 
-    read_experiment for accession PRJNA680934
-        experiment_accession	run_accession	description	study_accession
-        SRX9590782	SRR13150536	Illumina NovaSeq 6000 sequencing: GSM4946391: NC rep2 Homo sapiens RNA-Seq	PRJNA680934
-        SRX9590784	SRR13150538	Illumina NovaSeq 6000 sequencing: GSM4946393: si-EIF5A2 rep1 Homo sapiens RNA-Seq	PRJNA680934
-        SRX9590785	SRR13150539	Illumina NovaSeq 6000 sequencing: GSM4946394: si-EIF5A2 rep2 Homo sapiens RNA-Seq	PRJNA680934
-        SRX9590783	SRR13150537	Illumina NovaSeq 6000 sequencing: GSM4946392: NC rep3 Homo sapiens RNA-Seq	PRJNA680934
-        SRX9590786	SRR13150540	Illumina NovaSeq 6000 sequencing: GSM4946395: si-EIF5A2 rep3 Homo sapiens RNA-Seq	PRJNA680934
-        SRX9590781	SRR13150535	Illumina NovaSeq 6000 sequencing: GSM4946390: NC rep1 Homo sapiens RNA-Seq	PRJNA680934
+
+https://www.ebi.ac.uk/ena/portal/api/filereport?accession=PRJNA1151677&result=read_experiment
+
+    experiment_accession	run_accession	description	study_accession
+    SRX25813651	SRR30355576	Illumina NovaSeq 6000 sequencing: GSM8479666: NVF_E16-5_Rep1 [RNA-Seq] Mus musculus RNA-Seq	PRJNA1151677
+    SRX25813650	SRR30355578	Illumina NovaSeq 6000 sequencing: GSM8479664: NVF_E15-5_Rep2 [RNA-Seq] Mus musculus RNA-Seq	PRJNA1151677
+    ...
+
+https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRP528304&result=read_experiment
+
+    experiment_accession	run_accession	description	secondary_study_accession
+    SRX25813651	SRR30355575	Illumina NovaSeq 6000 sequencing: GSM8479666: NVF_E16-5_Rep1 [RNA-Seq] Mus musculus RNA-Seq	SRP528304
+    SRX25813649	SRR30355579	Illumina NovaSeq 6000 sequencing: GSM8479667: NVF_E16-5_Rep1 [ATAC-Seq] Mus musculus ATAC-seq	SRP528304
+
+read_run gives fastq URLs
         
 study:
     https://www.ebi.ac.uk/ena/portal/api/filereport?accession=SRP294329&result=study
 
     study_accession	description	secondary_study_accession
-    PRJNA680934	RNA-Seq analysis EIF5A2 knockdown effect on ovarian cancer cells	SRP294329
+    PRJNA1151677	Mapping cells through time and space with moscot - pancreatic endocrinogenesis multiome	SRP528304
 
 taxon
     https://www.ebi.ac.uk/ena/portal/api/filereport?accession=9606&result=taxon
     tax_id	description
     9606	Homo sapiens
 
-'''
+result=
+analysis,analysis_study,assembly,coding,noncoding,read_experiment,read_run,read_study,sample,sequence,study,taxon,tls_set,tsa_set,wgs_set
 
-"""
 @dataclass
 class enafastqs:
-help_text ="Get a ist of ENA fastqs for ID(s) like PRJNA627881"
+help_text ="Get a list of ENA fastqs for ID(s) like PRJNA627881"
 
 
     IDs: list[str], required=True
@@ -1288,14 +1290,17 @@ help_text ="Get a ist of ENA fastqs for ID(s) like PRJNA627881"
     ext: str = "ena.txt"
     "Output file extension"
 
-"""
-
+'''
 '''
 @cyc_app.command(group=cyc_metadata_ena)
 def ENA_list_analysis_files(args: _metadata_args) -> None: 
     """Get the list of BAM files for a study from ENA.
     
     Example: https://www.ebi.ac.uk/ena/portal/api/filereport?accession=PRJEB41752&result=analysis
+    
+    These may also be in read_run:
+    https://www.ebi.ac.uk/ena/portal/api/filereport?accession=PRJEB41752&result=read_run
+
     """
     
     # returns IDs  or  
@@ -1659,7 +1664,7 @@ class _geo_data_args:
     _: KW_ONLY
 
     study: str
-    "SRA or GEO study ID e.g. SRP294329, GSE117552"
+    "SRA or GEO study ID e.g. SRP294329, GSE295807"
     
     outputdir: File_or_Dir
     "Folder where metadata files will be stored."
@@ -1670,7 +1675,7 @@ class _geo_data_args:
 # def GEO_get_NCBI_counts(*, study: str, outputdir: File_or_Dir): #, destdir: File_or_Dir | None = None):
 
 
-@cyc_app.command(group=cyc_data_geo)
+@cyc_app.command(group=cyc_data_ncbi_counts)
 def GEO_get_NCBI_counts(args: _geo_data_args): #, destdir: File_or_Dir | None = None):
     """Generate a Bash script to retrieve NCBI-generated expression values from GEO, if they exist.
     
@@ -1681,11 +1686,11 @@ def GEO_get_NCBI_counts(args: _geo_data_args): #, destdir: File_or_Dir | None = 
     GEO download pages have a consistent format. It's silly to parse them repeatedly.
     
     Example:
-        Source: https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE162198
+        Source: https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE295807
 
-        /geo/download/?type=rnaseq_counts&acc=GSE162198&format=file&file=GSE162198_raw_counts_GRCh38.p13_NCBI.tsv.gz
-        /geo/download/?type=rnaseq_counts&acc=GSE162198&format=file&file=GSE162198_norm_counts_FPKM_GRCh38.p13_NCBI.tsv.gz
-        /geo/download/?type=rnaseq_counts&acc=GSE162198&format=file&file=GSE162198_norm_counts_TPM_GRCh38.p13_NCBI.tsv.gz
+        /geo/download/?type=rnaseq_counts&acc=GSE295807&format=file&file=GSE295807_raw_counts_GRCh38.p13_NCBI.tsv.gz
+        /geo/download/?type=rnaseq_counts&acc=GSE295807&format=file&file=GSE295807_norm_counts_FPKM_GRCh38.p13_NCBI.tsv.gz
+        /geo/download/?type=rnaseq_counts&acc=GSE295807&format=file&file=GSE295807_norm_counts_TPM_GRCh38.p13_NCBI.tsv.gz
         /geo/download/?format=file&type=rnaseq_counts&file=Human.GRCh38.p13.annot.tsv.gz
 
     This breaks down to:
@@ -1714,7 +1719,7 @@ def GEO_get_NCBI_counts(args: _geo_data_args): #, destdir: File_or_Dir | None = 
         log_message(f"No NCBI-generated data located for {args.study} with {acc}.")
         return
     #if not test_URL(acc):
-    #   invalid test - GEO responds even with GSE342nnn
+    #   invalid test - GEO responds even with GSE295nnn
     #    log_message(f"Download page not found for {args.study} at {acc}", fatal=True)
     output = [dedent(f"""
         #!/bin/bash
@@ -1723,7 +1728,7 @@ def GEO_get_NCBI_counts(args: _geo_data_args): #, destdir: File_or_Dir | None = 
         # This script fetches gene expression counts and derived values (TPM and FPKM) generated by GEO staff, assuming they exist for the series (GSE..)
         # Here is an explanation of the effort: https://www.ncbi.nlm.nih.gov/geo/info/rnaseqcounts.html
         # The comments below were copied from the page linked above.
-        # You can find an example here: https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE162198
+        # You can find an example here: https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE295807
         # 
         #my_dir=$(dirname $(readlink -f ${{BASH_SOURCE}}))
         my_dir=$(dirname ${{BASH_SOURCE}})
@@ -1742,7 +1747,7 @@ def GEO_get_NCBI_counts(args: _geo_data_args): #, destdir: File_or_Dir | None = 
             local_file=${{my_dir}}/${{file}}
 
             if [[ -e ${{local_file}} ]]; then 
-                echo "${{local_file}} exists" >&2
+                cho "${{local_file}} exists" >&2
             else
                 if [[ -e ${{local_file}}.gz ]]; then
                     echo "${{local_file}}.gz exists" >&2
@@ -1783,7 +1788,7 @@ def GEO_get_NCBI_counts(args: _geo_data_args): #, destdir: File_or_Dir | None = 
     
     for line in :
         if m := re.search(r'href="(.*?NCBI.tsv.gz)"', line):
-            # /geo/download/?type=rnaseq_counts&amp;acc=GSE215024&amp;format=file&amp;file=GSE215024_raw_counts_GRCh38.p13_NCBI.tsv.gz
+            # /geo/download/?type=rnaseq_counts&amp;acc=GSE295807&amp;format=file&amp;file=GSE295807_raw_counts_GRCh38.p13_NCBI.tsv.gz
             ncbi_counts.append(m.groups()[0])
     if not ncbi_counts:
         log_message(f"No counts files were found for {args.study} at {baseurl}")
@@ -1798,50 +1803,3 @@ if __name__ == "__main__":
     cyc_app()
 
 
-'''    
-def metadata(args):
-    studydir = os.path.realpath(args.STUDYDIR)
-    subdir = {s: os.path.join(studydir, s) for s in args.SOURCES}
-    check_dir_write_access(studydir + list(subdir.values()))
-
-    id_prefix_by_source = {"GEO": "GEO", "SRP": "SRA", "PRJ": "ENA"}
-
-    if "SRA" in source_for_db = SRAweb()
-
-    g2=GEOparse.get_GEO(geo="GSE162198", silent=True, destdir="workspace/GSE162198")
-    response = db.sra_metadata(ID, detailed=True)
-    for source in source_for_ids.keys():
-        tempdir = subdir[source]
- 
-     match source:
-        case "GEO":
-
-       >>> g2.relations
-        {'BioProject': ['https://www.ncbi.nlm.nih.gov/bioproject/PRJNA680934'], 'SRA': ['https://www.ncbi.nlm.nih.gov/sra?term=SRP294329']}
-
-        >>> gse.relations
-        {'BioProject': ['https://www.ncbi.nlm.nih.gov/bioproject/PRJNA1001347']}
-
-            return "Bad request"
-        case "SRA":
-            #d = _pysradb(["SRP294329"], outputdir = "workspace/pysradb",  outputfileprefix ="sra_", species = ["human", "mouse"],
-            #             expt_type = ["RNA-seq"])
-            #data, file = pySRAdb_get_metadata(ID = "SRP294329", outputdir = "workspace/pysradb/SRP294329", outputfileprefix = "pySRAdb")
-            #data = pySRAdb_parse_metadata(data=data, ID = "SRP294329", species = ["Homo sapiens", "Mus musculus"], expt_type = "RNA-Seq", #outputfileprefix = file.replace(".txt","")) #os.path.join("workspace/pysradb/SRP294329", "pySRAdb"))
-            
-            data, file = pySRAdb_get_metadata(ID = "GSE239889", outputdir = "workspace/pysradb/SRP294329", outputfileprefix = "pySRAdb")
-            data = pySRAdb_parse_metadata(data=data, ID = "GSE239889", species = ["Homo sapiens", "Mus musculus"], expt_type = "RNA-Seq", outputfileprefix = file.replace(".txt","")) #os.path.join("workspace/pysradb/SRP294329", "pySRAdb"))
-     case "ENA":
-            # we need SRP or PRJ for  ENA
-            data = get_ENA_fastq_list(ID = ID, outputfile)
-            data = parse_ENA_fastq_metadata(data, outputfile)
-
-            data = get_ENA_fastq_list(ID = "PRJNA931290", outputfile =  "workspace/pysradb/PRJNA931290")
-            data = ENA_reformat_fastq_list(data = data, outputfile = "workspace/pysradb/PRJNA931290.txt")
-            # if ena columns are not in SRA metadata,  get two columns from ENA fastq manifest.
-        sys.exit()
-   
-         case _:
-            log_message(f"unknown source {source}", fatal=True)
-  
-'''

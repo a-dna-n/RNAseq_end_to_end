@@ -110,16 +110,15 @@ class _study_args:
     study_key: str
     "Lastauthor_YY or Lastauthor_YY_MM"
 
-    #parse: bool = True
+    root_dir: FileName
     #"simplify/reformat the metadata"
 
-@cyc_app.command(group=cyc_group, help="Make directories for a study.")
+@cyc_app.command(group=cyc_group, help="Make directory and subdirectories for a study.")
 def register(args: _study_args):
-    """Make folder structure for a study
-    """
     pass
     """
-    #geo = 
+    #author_files_in_GEO/
+
     srp = _pySRAdb_convert_ID(ID = geo, fn = "gse-to-srp")
     get_GEO_metadata(SimpleNamespace(study = geo, outputdir = f"{folder}/metadata",  parse=True, outputfileprefix = ""))
     pySRAdb_get_metadata(SimpleNamespace(study = srp, outputdir = f"{folder}/metadata",  parse=True, outputfileprefix = ""))
@@ -138,7 +137,7 @@ def html_to_md(*, inputfile: FileName, outputformat: Literal["gfm", "gfm-raw_htm
 
 
 @cyc_app.command(group=cyc_group, help="Retrieve article metadata.")
-def get_article(*, pmid: str, outputfile: FileName | None = None):
+def pubmed_metadata(*, pmid: str, outputfile: FileName | None = None):
     from metapub import PubMedFetcher
     pubmed_api_key = os.getenv("NCBI_API_KEY", default="")
 
@@ -161,7 +160,7 @@ def get_article(*, pmid: str, outputfile: FileName | None = None):
         temp[k] = temp[k].replace("\n", " ").replace("  ", " ")
     values = [[temp.get(k, "unknown")] for k in keys]
     data = pd.DataFrame(values, index=keys).T #, columns = keys)
-    data.to_csv(sys.stdout, sep="\t", index=False)
+    #data.to_csv(sys.stdout, sep="\t", index=False)
 
     data["date"] = [x.replace("-","_") for x in data["date"]]
     data["YY"] = data["date"].str[2:4]  #[str(date)[2:4]"_".join(x.split("-")[:2]) for x in data["date"]]
