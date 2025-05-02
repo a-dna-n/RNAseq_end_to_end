@@ -227,7 +227,7 @@ def verify_columns_present_in_dataframe(
     # if any columns are missing, outputs error message and exits
     if isinstance(columns, str):
         columns = [columns]
-    if missing := columns - set(data.columns):
+    if missing := set(columns) - set(data.columns):
         missing = "\n".join(list(missing))
         if source:
             log_message(f"column(s) missing in {source}:")
@@ -4566,7 +4566,7 @@ def define_args():
         type=str,
         required=False,
         help="How to join.",
-        choices="inner outer left right",
+        choices="inner outer left right".split(),
         default="inner",
     )
     subparser.add_argument(
