@@ -1,5 +1,6 @@
 ## Partial list of results derived from RNA-seq
 
+```
 .
 ├── 0_Covid
 │   ├── human
@@ -991,4 +992,5 @@
         ├── H2_ctr_2.bam
         ├── H2_KD_1.bam
         └── H2_KD_2.bam
+```
 
