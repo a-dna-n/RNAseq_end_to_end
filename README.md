@@ -1,3 +1,36 @@
+## Purpose of this code - abbreviated protocol
+
+If you want to understand research related to mutations, or many articles about CRISPR screeens, the most informative article to read first, by far, is about _ACE2_:
+
+> Front Cell Dev Biol. 2023 Dec 8;11:1290876. doi: 10.3389/fcell.2023.1290876<br>
+> ACE2 knockout hinders SARS-CoV-2 propagation in iPS cell-derived airway and alveolar epithelial cells<br>
+> Ryo Niwa, Kouji Sakai, Mandy Siu Yu Lung, Tomoko Matsumoto, Ryuta Mikawa, Shotaro Maehana, Masato Suzuki, Yuki Yamamoto, Thomas L Maurissen, Ai Hirabayashi, Takeshi Noda, Makoto Kubo, Shimpei Gotoh, Knut Woltjen <br>
+> [PMC10750251](https://pmc.ncbi.nlm.nih.gov/articles/PMC10750251/)
+
+This article was surprisingly easy to follow. I knew that _ACE2_ has something to do with COVID but nothing else about the gene or the CRISPR-related computational methods. I'm incapable of writing about it briefly, so if you want to save time:
+
+1. Look at Fig. 1. The results section begins with the paragraph above it. They authors show the genomic sequence for each candidate, and a cDNA diagram with all three plus the TM domain, which explains the labels and a whole lot more.
+2. Look at Fig. 3. In the KO, _ACE2_ expression drops to 0, and there are negligible effects otherwise.
+
+Here's the challenge. Look for articles from oncology, virology, whole-genome knockout/CRISPR screens, about a knockout, loss of any kind, deficiency, haploinsufficiency etc. and:
+- find one article where RNA-seq was used to show a complete drop in mRNA expression;
+- among the articles that include results from new RNA-seq experiments, find one where the authors connect the RNA-seq to the gene(s) that was allegedly knocked out;
+- try to find a way to explain the amnesia or targeted amnesia of the authors of all these articles.
+
+In the article above, Fig. 1 is just an early indication of the diligence of the authors. They took steps to make it very easy to follow what they did and why, and it only took minutes to find their expression results in GEO, verify what they reported, and learn much more. Typically, labels and other metadata in GEO are a mess, and there's no way to see that as anything but intentional.
+
+There is much more to share about this article, but the extraordinary thing about Fig. 3 is that it shows the complete disappearance of mRNA expression. This is exactly what we would expect to see if there is a mutation in every allele present in a cell that leads to nonsense-mediate decay of any mRNA from that allele. The authors made clonal cell lines precisely because a mutation in one allele doesn't trigger NMD in mRNAs transcribed from any other alleles (this is true even when there is only one allele, since there is no other allele).
+
+The reason for this pipeline is the harm caused by a series of ruses in scientific articles, web sites of national institute and academic cancer center etc., including the belief that one frameshift mutation causes a mythical loss of function, a truncation etc. The only way to sustain this myth is to present images based on antibodies and avoid mentioning evidence, because it's completely invalid and it's consistenly applied to the genes known to trigger NMD globally and to escape NMD.
+
+## What's not standard
+
+There are multiple modules in this repo, but the one dedicated to analyzing RNA-seq takes reproducibility a step further. It outputs Bash scripts with hard-coded parameters for all steps, copies a Python script etc. to avoid the common practice of separating relevant parameters in config files, sometimes many, and to make it easy to keep all the scripts and logs with the results.
+
+## An example
+
+https://doi.org/10.5281/zenodo.17055095
+
 ## Purpose(s) of this code
 
 This repo contains a suite of Python tools that make it possible to reprocess RNA-seq data from scratch from a GEO, ENA or SRA study ID spotted in an article, or to retrieve derived results, basically with a few commands. The primary motivation for this code is to draft a scientific manuscript that will scrutinize many scientific articles, so the code is intended to minimize the need to remember relevant details.
