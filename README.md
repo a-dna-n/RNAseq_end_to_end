@@ -26,22 +26,24 @@ Please read the article and open every supplement. I looked for a control of sor
 
 For the kind of article described above, RNA-seq data is often unavailable, but if it is, the metadata is a mess and any results they posted are cryptic, the data is sometimes misplaced, and it appears to be fulfilling a requirement. Lots of papers have supplements with differential expression only but clearly contradicting the "loss" etc.
 
-It only took a few minutes to:
+The expression data posted by the authors in GEO had the same labels as the article, and it included all genes in a reference transcriptome:
+
+<img width="799" height="71" alt="image" src="https://github.com/user-attachments/assets/bd5e8db7-e20b-4c5f-85f4-6f011119c88d" />
+
+As a consequence, it only took a few minutes to:
 - search for the ID in the article (PRJDB15620)
 - go to [GEO](https://www.ncbi.nlm.nih.gov/gds/?term=PRJDB15620)
 - check if the reads appeared to be there [(18 samples)](https://www.ncbi.nlm.nih.gov/gds/?term=PRJDB15620)
 - download the expression values [(Download data: TXT)](https://www.ncbi.nlm.nih.gov/gds/?term=PRJDB15620) then GSE275240_gene_tpm_ACE2KO.txt.gz
-- verify the results for _ACE2_ in Fig. 3, confirm that the results were actually better than the figure suggests
+- verify the results for _ACE2_ in Fig. 3
+- confirm that the results were presented a bit modestly in the figure
 - verify that there weren't massive differences in mitochondrial gene expression.
-
-This was only possible because the authors were meticulous with their labels and posted results for all genes:
-<img width="662" height="75" alt="image" src="https://github.com/user-attachments/assets/119eab4a-bfa1-4163-a50e-2b1f19ef4556" />
 
 There was something else. They used a reference transcriptome that included non-standard chromosomes, which leads to overcounting for reads aligned to muliple loci and significantly inflates counts for artifactual RNAs. I have always made this choice arbitrarily, and I wasn't aware of this. Basically, the suppression of _ACE2_ is almost certainly more pronounced than the article shows.
 
 Oh, this artifact made me understand results from Cavatica etc. There are grant-funded projects that use this artifact to construct a non-standard transcriptome offline that suppresses mitochondrial gene expression. It is the source of a rare exception to consistency in UCSC Xena data.
 
-Lastly, this article makes it possible to understand the typical purpose of RNA-seq, because the changes are usually radical, namely to build a story about a vulnerability of the "loss" (always a gain-of-function mutant) that always becomes targetable, or propose a therapeutic target that will never work; the latter occurred with coronavirus screens, which ignored the highest-ranking hits because they had already been typecast.
+Lastly (for now), this article makes it possible to understand the typical purpose of RNA-seq in "loss" papers, because the changes are usually radical, namely to build a story about a vulnerability of the "loss" (always a gain-of-function mutant) that always becomes targetable, or propose a therapeutic target that will never work; the latter occurred with coronavirus screens, which ignored the highest-ranking hits because they had already been typecast.
 
 ## What's not standard
 
