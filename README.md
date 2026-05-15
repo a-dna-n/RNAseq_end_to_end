@@ -52,9 +52,10 @@ There are multiple modules in this repo, but the one dedicated to analyzing RNA-
 
 ## Results
 
-Not up to date. More results are in Zenodo in draft form.
+Not up to date. More results are forthcoming (in Zenodo in draft form).
 
-https://doi.org/10.5281/zenodo.17055095
+Lee KDM6A: https://doi.org/10.5281/zenodo.17055095
+Rathmell VHL (CRAM): https://zenodo.org/records/17058069
 
 ## Purpose(s) of this code
 
