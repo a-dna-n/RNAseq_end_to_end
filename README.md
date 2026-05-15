@@ -1,45 +1,46 @@
 ## Purpose of this code - abbreviated protocol
 
-If you want to understand the state of cancer research, virology, or many articles about CRISPR screens, the most informative article to read first, by far, is about _ACE2_:
+If you want to understand the state of cancer research, virology, or many articles about CRISPR screens, the most informative article to read is about _ACE2_:
 
 > Front Cell Dev Biol. 2023 Dec 8;11:1290876. doi: 10.3389/fcell.2023.1290876<br>
 > ACE2 knockout hinders SARS-CoV-2 propagation in iPS cell-derived airway and alveolar epithelial cells<br>
 > Ryo Niwa, Kouji Sakai, Mandy Siu Yu Lung, Tomoko Matsumoto, Ryuta Mikawa, Shotaro Maehana, Masato Suzuki, Yuki Yamamoto, Thomas L Maurissen, Ai Hirabayashi, Takeshi Noda, Makoto Kubo, Shimpei Gotoh, Knut Woltjen <br>
 > [PMC10750251](https://pmc.ncbi.nlm.nih.gov/articles/PMC10750251/)
 
-This article was surprisingly easy to follow given that I didn't know anything about _ACE2_, other than hearing the name on the news, or about those computational tools. Everyone should read the article and at least look at every supplement. If you really don't have time, here are two highlights:
+This article was surprisingly easy to follow given that I didn't know anything about _ACE2_, other than hearing the name on the news, or about those computational tools. Everyone should read the article and at least look at every supplement. If you really don't have time, here are two highlights that will help you triage CRISPR hits etc. from now on using a few heuristics (not all here):
 
 1. Look at Fig. 1. It shows genomic sequences, a diagram of the cDNA, and much more. The paragraph above the figure is where the results section begins.
 2. Look at Fig. 3. In the knockout, _ACE2_ expression drops to 0, but otherwise there are only minor differences.
 
 The article gives the impression that it's totally normal to look at the effect of a mutation on the genome and on the mRNA, so writing all this code may have been meaningless. The challenge:
-  - Write down the date. Start looking for articles from oncology, virology, whole-genome knockout/CRISPR screens, about a knockout, loss of any kind, deficiency, haploinsufficiency etc., and:
+  - Write down the date. Think "Voyage of the Beagle".
+  - Start looking for articles from oncology, virology, whole-genome knockout/CRISPR screens, about a knockout, loss of any kind, deficiency, haploinsufficiency etc., and:
     - Find ONE article where RNA-seq was used to show a complete drop in mRNA expression, and/or (you decide)
     - Among the articles that include results from new RNA-seq experiments, find ONE where the authors connect the RNA-seq to the gene(s) that was allegedly knocked out.
   - Try to formulate an explanation for the global or targeted amnesia of the authors of all these articles about RNA-seq.
 
 There is much more to share about this article, but the extraordinary thing about Fig. 3 is that it shows the complete disappearance of mRNA expression. This is exactly what we would expect to see if there is a mutation in every allele present in a cell, and every mutation leads to nonsense-mediate decay of any mRNA from that allele. The authors made clonal cell lines precisely because a mutation in one allele doesn't trigger NMD in mRNAs transcribed from any other alleles (this is true even when there is only one allele, since there is no other allele).
 
-The reason for this pipeline is the harm caused by a series of ruses in scientific articles, web sites of national institute and academic cancer center etc., including the belief that one frameshift mutation causes a mythical loss of function, a truncation etc. The only way to sustain this myth is to present images based on antibodies and avoid mentioning evidence, because it's completely invalid and it's consistenly applied to the genes known to trigger NMD globally and to escape NMD.
+The reason for this pipeline is the harm caused by a series of ruses in scientific articles, web sites of national institute and academic cancer center etc., including the "belief" (coerced concept) that one frameshift mutation causes a mythical loss of function, a truncation etc. The only way to sustain this myth is to present images based on antibodies and avoid mentioning evidence, because it's completely invalid and it's consistenly applied to the same genes, some of which are known to trigger NMD globally and to escape NMD.
 
-Please read the article and open every supplement. I looked for a control of sorts as an afterthought (ACE2, CRISPR, RNA-seq), after realigning RNA-seq data from many other oncology articles, then five articles about coronavirus whole-genome CRISPR screens because the top hits were clearly misrepresented. I thought it would just confirm an actual knockout, but the cDNA diagram in Fig. 1 is so informative by itself that it made me notice the labels in the text above and the TM domain. The authors bring everyone along in a guided jump to the base level, like the UCSC genome browser. It seems to have come naturally, but the willingness to explain and share is a contrast by itself, in addition to the biological contrast.
+Please read the article about _ACE2_ and just open every supplement. I went looking for a control of sorts as an afterthought (ACE2, CRISPR, RNA-seq), after realigning RNA-seq data from many other oncology articles, then five articles about coronavirus whole-genome CRISPR screens because the top hits were clearly misrepresented. I thought it would just confirm an actual knockout, but the cDNA diagram in Fig. 1 is so informative by itself that it was a complete contrast with many, many studies. The authors bring everyone along in a guided jump to the base level, like the UCSC genome browser. That's in addition to the biological contrast, which (I think) doesn't exist in oncology and hadn't occurred to me. 
 
-For the kind of article described above, RNA-seq data is often unavailable, but if it is, the metadata is a mess and any results they posted are cryptic, the data is sometimes misplaced, and it appears to be fulfilling a requirement. Lots of papers have supplements with differential expression only but clearly contradicting the "loss" etc.
+For the other kind of article described above, RNA-seq data is often unavailable, and if it is, the metadata is a mess and any results they posted are cryptic, the data is sometimes misplaced, and it appears to be fulfilling a requirement. Lots of papers have supplements with differential expression only but clearly contradicting the "loss" etc. This is consistently the case with the whole-genome COVID CRISPR papers.
 
-The expression data posted by the authors in GEO had the same labels as the article, and it included all genes in a reference transcriptome:
+The expression data posted by the authors in GEO had the same labels as the article, and it included all genes in the reference transcriptome. This is just half of the samples, for clarity:
 
 <img width="799" height="71" alt="image" src="https://github.com/user-attachments/assets/bd5e8db7-e20b-4c5f-85f4-6f011119c88d" />
 
-As a consequence, it only took a few minutes to:
+As a consequence of this diligence, it only took me a few minutes to:
 - search for the ID in the article (PRJDB15620)
 - go to [GEO](https://www.ncbi.nlm.nih.gov/gds/?term=PRJDB15620)
 - check if the reads appeared to be there [(18 samples)](https://www.ncbi.nlm.nih.gov/gds/?term=PRJDB15620)
 - download the expression values [(Download data: TXT)](https://www.ncbi.nlm.nih.gov/gds/?term=PRJDB15620) then GSE275240_gene_tpm_ACE2KO.txt.gz
 - verify the results for _ACE2_ in Fig. 3
-- confirm that the results were presented a bit modestly in the figure
+- confirm the impression that the graph is a bit too modest - the results are even better
 - verify that there weren't massive differences in mitochondrial gene expression.
 
-There was something else. They used a reference transcriptome that included non-standard chromosomes, which leads to overcounting for reads aligned to muliple loci and significantly inflates counts for artifactual RNAs. I have always made this choice arbitrarily, and I wasn't aware of this. Basically, the suppression of _ACE2_ is almost certainly more pronounced than the article shows.
+There was something else. The results were obtained with a reference transcriptome that included non-standard chromosomes, which leads to overcounting for reads aligned to muliple loci and significantly inflates counts for artifactual RNAs. I have always made this choice arbitrarily, and I wasn't aware of this. Basically, the suppression of _ACE2_ is almost certainly more pronounced than the article shows.
 
 Oh, this artifact made me understand results from Cavatica etc. There are grant-funded projects that use this artifact to construct a non-standard transcriptome offline that suppresses mitochondrial gene expression. It is the source of a rare exception to consistency in UCSC Xena data.
 
@@ -47,9 +48,11 @@ Lastly (for now), this article makes it possible to understand the typical purpo
 
 ## What's not standard
 
-There are multiple modules in this repo, but the one dedicated to analyzing RNA-seq takes reproducibility a step further. It outputs Bash scripts with hard-coded parameters for all steps, copies a Python script etc. to avoid the common practice of separating relevant parameters in config files, sometimes many, and to make it easy to keep all the scripts and logs with the results.
+There are multiple modules in this repo, but the one dedicated to analyzing RNA-seq takes reproducibility a step further, basically assuming responsbility for the ultimate goal of contradicting an article. For every new data set to analyze, it (Python) outputs Bash scripts with hard-coded parameters for all steps, copies a Python script to later merge counts etc., in order to avoid the common practice of keeping relevant parameters in config files, sometimes many (snakemake), and to make it easy to keep all the scripts and logs with the results. The intent behind this is to make it possible to reproduce the results but suggest that it probably won't be, since the underlying tools are all standard. There's no need to look up details long forgotten, or to keep this code tied to past results.
 
 ## Results
+
+Not up to date. More results are in Zenodo in draft form.
 
 https://doi.org/10.5281/zenodo.17055095
 
