@@ -48,7 +48,7 @@ Lastly (for now), this article makes it possible to understand the typical purpo
 
 ## What's not standard
 
-There are multiple modules in this repo, but the one dedicated to analyzing RNA-seq takes reproducibility a step further, basically assuming responsbility for the ultimate goal of contradicting an article. For every new data set to analyze, it (Python) outputs Bash scripts with hard-coded parameters for all steps, copies a Python script to later merge counts etc., in order to avoid the common practice of keeping relevant parameters in config files, sometimes many (snakemake), and to make it easy to keep all the scripts and logs with the results. The intent behind this is to make it possible to reproduce the results but suggest that it probably won't be, since the underlying tools are all standard. There's no need to look up details long forgotten, or to keep this code tied to past results.
+There are multiple modules in this repo, but the one dedicated to analyzing RNA-seq takes reproducibility a step further, basically assuming responsbility for the ultimate goal of contradicting an article. For every new data set to analyze, it (Python) outputs Bash scripts with hard-coded parameters for all steps, copies a Python script to later merge counts etc., in order to avoid the common practice of keeping relevant parameters in config files, sometimes many (snakemake), and to make it easy to keep all the scripts and logs with the results. The intent behind this is to make it possible to reproduce the results but suggest that it probably won't be necessary, since the underlying tools are all standard. There's no need to look up details long forgotten, or to keep this code tied to past results.
 
 ## Results
 
