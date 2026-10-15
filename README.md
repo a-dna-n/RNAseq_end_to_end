@@ -1,50 +1,68 @@
 ## Purpose of this code - abbreviated protocol
 
-If you want to understand the state of cancer research, virology, or many articles about CRISPR screens, the most informative article to read is about _ACE2_:
-
+If you want to understand the state of cancer research, virology, or many articles about CRISPR screens, the single most informative article to read is about _ACE2_:
 > Front Cell Dev Biol. 2023 Dec 8;11:1290876. doi: 10.3389/fcell.2023.1290876<br>
 > ACE2 knockout hinders SARS-CoV-2 propagation in iPS cell-derived airway and alveolar epithelial cells<br>
 > Ryo Niwa, Kouji Sakai, Mandy Siu Yu Lung, Tomoko Matsumoto, Ryuta Mikawa, Shotaro Maehana, Masato Suzuki, Yuki Yamamoto, Thomas L Maurissen, Ai Hirabayashi, Takeshi Noda, Makoto Kubo, Shimpei Gotoh, Knut Woltjen <br>
 > [PMC10750251](https://pmc.ncbi.nlm.nih.gov/articles/PMC10750251/)
 
-This article was surprisingly easy to follow given that I didn't know anything about _ACE2_, other than hearing the name on the news, or about those computational tools. Everyone should read the article and at least look at every supplement. If you really don't have time, here are two highlights that will help you triage CRISPR hits etc. from now on using a few heuristics (not all here):
+This article is surprisingly easy to follow. I had heard about _ACE2_ on the news and noticed it in articles about COVID CRISPR screens, which I read because of other genes. I knew nothing about the gene or the protein, or the computational tools mentioned in the article. I thought someone might ask for a positive control, so I searched for "ACE2 CRISPR RNA-seq". This was one of the last two RNA-seq data sets I re-analyzed from scratch. Both are counter-examples I hadn't even conceived.
 
-1. Look at Fig. 1. It shows genomic sequences, a diagram of the cDNA, and much more. The paragraph above the figure is where the results section begins.
-2. Look at Fig. 3. In the knockout, _ACE2_ expression drops to 0, but otherwise there are only minor differences.
+I strongly recommend looking at every figure, opening every supplement, and reading the results section of the article, because I will likely create the impression that it is immodest or complicated. For the very busy, here are two highlights:
 
-The article gives the impression that it's totally normal to look at the effect of a mutation on the genome and on the mRNA, so writing all this code may have been meaningless. The challenge:
-  - Write down the date. Think "Voyage of the Beagle".
-  - Start looking for articles from oncology, virology, whole-genome knockout/CRISPR screens, about a knockout, loss of any kind, deficiency, haploinsufficiency etc., and:
-    - Find ONE article where RNA-seq was used to show a complete drop in mRNA expression, and/or (you decide)
-    - Among the articles that include results from new RNA-seq experiments, find ONE where the authors connect the RNA-seq to the gene(s) that was allegedly knocked out.
-  - Try to formulate an explanation for the global or targeted amnesia of the authors of all these articles about RNA-seq.
+1. Look at Fig. 1. It shows genomic sequences, a diagram of the cDNA, and much more. The paragraph above the figure is where the results section begins. You should read it.
+2. Look at Fig. 3. In the knockout, _ACE2_ expression drops to 0, but otherwise there are only minor differences in expression levels.
 
-There is much more to share about this article, but the extraordinary thing about Fig. 3 is that it shows the complete disappearance of mRNA expression. This is exactly what we would expect to see if there is a mutation in every allele present in a cell, and every mutation leads to nonsense-mediate decay of any mRNA from that allele. The authors made clonal cell lines precisely because a mutation in one allele doesn't trigger NMD in mRNAs transcribed from any other alleles (this is true even when there is only one allele, since there is no other allele).
+This article will help you triage CRISPR hits from now on using a few heuristics that I'll explain another time. It will retroactively make many of my analyses superfluous because fewer examples will be necessary. The article suggests that it is completely normal to look at the effect of a mutation on the genome and on the mRNA (and to guide the reader through every step with thoughtful labels, among other courtesies), so here is a challenge:
 
-The reason for this pipeline is the harm caused by a series of ruses in scientific articles, web sites of national institute and academic cancer center etc., including the "belief" (coerced concept) that one frameshift mutation causes a mythical loss of function, a truncation etc. The only way to sustain this myth is to present images based on antibodies and avoid mentioning evidence, because it's completely invalid and it's consistenly applied to the same genes, some of which are known to trigger NMD globally and to escape NMD.
+- Look for articles from oncology, virology, whole-genome knockout/CRISPR screens, about knockouts or just one knockout, about loss of any kind, deficiency, haploinsufficiency. Just keep track of the number of articles you peruse.
+- Find ONE article where RNA-seq was used to show a complete drop in mRNA expression.
+- Among the articles that include results from new RNA-seq experiments, find ONE where the authors connect the RNA-seq to the gene(s) that was allegedly knocked out.
+
+If you find any, let me know - I'll gladly update this, with attribution.
+
+Can you formulate an explanation for the amnesia of the authors of these articles about RNA-seq? It's actually very simple.
+
+There is much more to share about this article, but the extraordinary thing about Fig. 3 is that it shows the complete disappearance of mRNA expression. This is what we would expect to see if there is a mutation in every allele present in a cell AND every mutation leads to nonsense-mediate decay (NMD) of any mRNA from that allele. The authors made clonal cell lines precisely because a mutation in one allele doesn't trigger NMD in mRNAs transcribed from any other allele(s) present, and this was after they tested several candidates.
+
+The motivation for this pipeline is the harm caused by a series of ruses that recur in scientific articles, web sites of national institutes and academic cancer centers etc., including the dogma that a single frameshift mutation can cause a complete loss of all functions of all alleles, or induces a truncation. The only way to sustain this myth is to present images based on antibodies and avoid mentioning evidence, because this dogma is completely invalid and it is consistenly applied to the same genes, some of which are known to trigger NMD globally and to escape NMD.
+
+Here is a rare instance where authors examine mRNA levels to understand the impact of mutations:
+
+> De Novo Nonsense Mutations in KAT6A, a Lysine Acetyl-Transferase Gene, Cause a Syndrome Including Microcephaly and Global Developmental Delay<br>
+> Am J Hum Genet. 2015 Mar 5;96(3):498–506.<br>
+> doi: 10.1016/j.ajhg.2015.01.017<br>
+> [PMC4375619](https://pmc.ncbi.nlm.nih.gov/articles/PMC4375619/)
+
+The result?
+
+> KAT6A Mutations Do Not Undergo Nonsense-Mediated Decay
+
+What else would you expect when an identical mutation occurs in unrelated individuals with the same phenotype?
 
 Please read the article about _ACE2_ and just open every supplement. I went looking for a control of sorts as an afterthought (ACE2, CRISPR, RNA-seq), after realigning RNA-seq data from many other oncology articles, then five articles about coronavirus whole-genome CRISPR screens because the top hits were clearly misrepresented. I thought it would just confirm an actual knockout, but the cDNA diagram in Fig. 1 is so informative by itself that it was a complete contrast with many, many studies. The authors bring everyone along in a guided jump to the base level, like the UCSC genome browser. That's in addition to the biological contrast, which (I think) doesn't exist in oncology and hadn't occurred to me. 
 
-For the other kind of article described above, RNA-seq data is often unavailable, and if it is, the metadata is a mess and any results they posted are cryptic, the data is sometimes misplaced, and it appears to be fulfilling a requirement. Lots of papers have supplements with differential expression only but clearly contradicting the "loss" etc. This is consistently the case with the whole-genome COVID CRISPR papers.
+Far more often, RNA-seq data generated to support an article is either unavailable or messy. Results and metadata posted by authors are frequently cryptic or misplaced, and it appears that the authors are nominally fulfilling a requirement. Lots of papers have supplements with differential expression only but clearly contradicting the "loss" etc. This is consistently the case with the whole-genome COVID CRISPR papers.
 
-The expression data posted by the authors in GEO had the same labels as the article, and it included all genes in the reference transcriptome. This is just half of the samples, for clarity:
+The expression data posted by the authors of the _ACE2_ article in GEO had the same labels as the article (save a minor misspelling). They included all genes in the reference transcriptome. This is just half of the samples, for clarity:
 
 <img width="799" height="71" alt="image" src="https://github.com/user-attachments/assets/bd5e8db7-e20b-4c5f-85f4-6f011119c88d" />
+<br>
+As a consequence of the diligence of the authors, it only took a few minutes to:
 
-As a consequence of this diligence, it only took me a few minutes to:
 - search for the ID in the article (PRJDB15620)
 - go to [GEO](https://www.ncbi.nlm.nih.gov/gds/?term=PRJDB15620)
-- check if the reads appeared to be there [(18 samples)](https://www.ncbi.nlm.nih.gov/gds/?term=PRJDB15620)
+- check if the reads were available [(18 samples)](https://www.ncbi.nlm.nih.gov/gds/?term=PRJDB15620)
 - download the expression values [(Download data: TXT)](https://www.ncbi.nlm.nih.gov/gds/?term=PRJDB15620) then GSE275240_gene_tpm_ACE2KO.txt.gz
 - verify the results for _ACE2_ in Fig. 3
 - confirm the impression that the graph is a bit too modest - the results are even better
 - verify that there weren't massive differences in mitochondrial gene expression.
 
-There was something else. The results were obtained with a reference transcriptome that included non-standard chromosomes, which leads to overcounting for reads aligned to muliple loci and significantly inflates counts for artifactual RNAs. I have always made this choice arbitrarily, and I wasn't aware of this. Basically, the suppression of _ACE2_ is almost certainly more pronounced than the article shows.
+There was something else. The results were obtained with a reference transcriptome that included non-standard chromosomes, which leads to overcounting for reads aligned to muliple loci and significantly inflates counts for artifactual RNAs. I have always made this choice arbitrarily, so I was not aware of this pitfall. Basically, the suppression of _ACE2_ is actually more pronounced than the article shows.
 
-Oh, this artifact made me understand results from Cavatica etc. There are grant-funded projects that use this artifact to construct a non-standard transcriptome offline that suppresses mitochondrial gene expression. It is the source of a rare exception to consistency in UCSC Xena data.
+Examining this data led me to notice that there are grant-funded projects that use this artifact to construct a non-standard transcriptome offline that suppresses mitochondrial gene expression. It is the source of a rare exception to consistency in UCSC Xena data.
 
-Lastly (for now), this article makes it possible to understand the typical purpose of RNA-seq in "loss" papers, because the changes are usually radical, namely to build a story about a vulnerability of the "loss" (always a gain-of-function mutant) that always becomes targetable, or propose a therapeutic target that will never work; the latter occurred with coronavirus screens, which ignored the highest-ranking hits because they had already been typecast.
+Lastly (for now), this article makes it possible to understand the typical purpose of RNA-seq in "loss" papers, because the changes are usually radical: to build a story about a vulnerability caused by the "loss" (it is always a gain of function) that becomes an opportunity for combinations of treatments, or to propose a therapeutic target that will never work. The latter clearly occurred with coronavirus screens, which ignored the highest-ranking hits because they had already been typecast.
 
 ## What's not standard
 
